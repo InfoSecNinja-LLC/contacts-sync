@@ -1,9 +1,10 @@
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from contacts_sync.adapters.base import ChangedContact, ChangeSet, SyncTokenExpiredError
 from contacts_sync.models import CanonicalContact, Email, Phone
 
-PERSON_FIELDS = "names,emailAddresses,phoneNumbers,addresses,biographies,organizations"
+PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies"
 
 
 class GoogleAdapter:
@@ -45,8 +46,9 @@ class GoogleAdapter:
                     next_sync_token = response["nextSyncToken"]
                 if not page_token:
                     break
-        except Exception as exc:
-            if "EXPIRED_SYNC_TOKEN" in str(exc) or "410" in str(exc):
+        except HttpError as exc:
+            status = exc.resp.status if hasattr(exc, "resp") else None
+            if status == 410 or "EXPIRED_SYNC_TOKEN" in str(exc):
                 raise SyncTokenExpiredError(str(exc)) from exc
             raise
 
