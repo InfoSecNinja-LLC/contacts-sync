@@ -1,0 +1,8 @@
+contacts.db
+sync.log
+review.md
+.env
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
