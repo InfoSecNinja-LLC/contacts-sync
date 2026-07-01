@@ -2551,7 +2551,7 @@ git commit -m "Add review, status, and doctor CLI commands"
 
 ---
 
-### Task 18: HTTP retry/backoff for Microsoft and iCloud adapters
+### Task 17: HTTP retry/backoff for Microsoft and iCloud adapters
 
 **Files:**
 - Create: `contacts_sync/http_retry.py`
@@ -2645,7 +2645,7 @@ git commit -m "Add exponential backoff retry for 429/5xx responses"
 
 ---
 
-### Task 19: Sync audit log
+### Task 18: Sync audit log
 
 **Files:**
 - Modify: `contacts_sync/sync_engine.py`
@@ -2778,7 +2778,7 @@ git commit -m "Add sync audit logging to sync.log"
 
 ---
 
-### Task 20: README and GitHub-publish polish
+### Task 19: README and GitHub-publish polish
 
 **Files:**
 - Create: `README.md`
