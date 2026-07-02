@@ -326,5 +326,5 @@ def test_discover_addressbook_path_raises_on_auth_failure(requests_mock):
         text="Unauthorized",
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         discover_addressbook_path("me@icloud.com", "bad-pass")

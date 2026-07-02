@@ -16,6 +16,7 @@ default. Do not change this back to stdlib XML.
 """
 
 import defusedxml.ElementTree as ET
+import requests
 import vobject
 
 from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
@@ -178,14 +179,21 @@ def discover_addressbook_path(apple_id: str, app_password: str) -> str:
     """
     auth = (apple_id, app_password)
 
-    principal_response = request_with_retry(
-        "PROPFIND",
-        BASE_URL + "/",
-        data=PRINCIPAL_PROPFIND_BODY,
-        auth=auth,
-        headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
-    )
-    principal_response.raise_for_status()
+    try:
+        principal_response = request_with_retry(
+            "PROPFIND",
+            BASE_URL + "/",
+            data=PRINCIPAL_PROPFIND_BODY,
+            auth=auth,
+            headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
+        )
+        principal_response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(
+            "Failed to discover iCloud CardDAV principal — check that the app-specific "
+            "password is valid and hasn't been revoked."
+        ) from exc
+
     principal_href = _extract_propstat_href(principal_response.text, "D:current-user-principal")
     if not principal_href:
         raise RuntimeError(
@@ -193,14 +201,21 @@ def discover_addressbook_path(apple_id: str, app_password: str) -> str:
             "support CardDAV, or the app-specific password may be invalid."
         )
 
-    home_response = request_with_retry(
-        "PROPFIND",
-        BASE_URL + principal_href,
-        data=ADDRESSBOOK_HOME_PROPFIND_BODY,
-        auth=auth,
-        headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
-    )
-    home_response.raise_for_status()
+    try:
+        home_response = request_with_retry(
+            "PROPFIND",
+            BASE_URL + principal_href,
+            data=ADDRESSBOOK_HOME_PROPFIND_BODY,
+            auth=auth,
+            headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
+        )
+        home_response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(
+            "Failed to discover iCloud CardDAV addressbook home — check that the "
+            "app-specific password is valid and hasn't been revoked."
+        ) from exc
+
     home_href = _extract_propstat_href(home_response.text, "C:addressbook-home-set")
     if not home_href:
         raise RuntimeError(
