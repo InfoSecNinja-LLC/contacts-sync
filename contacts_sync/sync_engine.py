@@ -1,10 +1,13 @@
 import json
+import logging
 from dataclasses import dataclass
 from contacts_sync.db import Database
 from contacts_sync.matcher import match_contact, normalize_email, normalize_phone
 from contacts_sync.merger import merge_single_value, merge_multi_value
 from contacts_sync.models import Email, Phone
 from contacts_sync.adapters.base import SyncTokenExpiredError
+
+logger = logging.getLogger("contacts_sync.sync")
 
 
 def _contact_to_review_json(contact) -> str:
@@ -49,6 +52,7 @@ class SyncEngine:
                             self._db.delete_contact(contact_id)
                         if contact_id:
                             deleted += 1
+                            logger.info(f"DELETE contact_id={contact_id} provider={name} provider_id={change.provider_id}")
                         continue
 
                     if contact_id is None:
@@ -70,6 +74,7 @@ class SyncEngine:
                             continue
                         else:
                             created += 1
+                            logger.info(f'CREATE contact="{change.contact.display_name}" provider={name} provider_id={change.provider_id}')
                             if not dry_run:
                                 contact_id = self._db.create_contact(change.contact)
                                 self._db.link_provider(contact_id, name, change.provider_id)
@@ -119,6 +124,10 @@ class SyncEngine:
         ]
 
         existing_contact.field_meta = meta
+        logger.info(
+            f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
+            f"fields=display_name,notes,emails,phones"
+        )
         if not dry_run:
             self._db.update_contact(existing_contact)
 

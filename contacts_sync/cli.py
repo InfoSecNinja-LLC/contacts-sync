@@ -1,3 +1,5 @@
+import logging
+
 import typer
 from contacts_sync.db import Database
 from contacts_sync.sync_engine import SyncEngine
@@ -5,6 +7,15 @@ from contacts_sync.auth import google_auth, microsoft_auth, icloud_auth
 from contacts_sync.adapters.google import GoogleAdapter
 from contacts_sync.adapters.microsoft import MicrosoftAdapter
 from contacts_sync.adapters.icloud import ICloudAdapter
+
+
+def _configure_logging():
+    logger = logging.getLogger("contacts_sync.sync")
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler("sync.log")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger.addHandler(handler)
+
 
 app = typer.Typer()
 auth_app = typer.Typer()
@@ -58,6 +69,7 @@ def sync(
     dry_run: bool = typer.Option(False, "--dry-run"),
     microsoft_client_id: str = typer.Option(..., envvar="CONTACTS_SYNC_MS_CLIENT_ID"),
 ):
+    _configure_logging()
     db = Database(DB_PATH)
     db.migrate()
     try:
