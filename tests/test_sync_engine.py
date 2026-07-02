@@ -105,6 +105,25 @@ def test_ambiguous_match_is_recorded_for_review(db):
     assert result.pending_review == 1
 
 
+def test_ambiguous_match_stores_contact_data_for_review(db):
+    db.create_contact(CanonicalContact(display_name="Jane Smith", emails=[Email(value="jane@ambiguous.com")]))
+    db.create_contact(CanonicalContact(display_name="Jane Smith Two", emails=[Email(value="jane@ambiguous.com")]))
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(display_name="Jane Smith", emails=[Email(value="jane@ambiguous.com")]),
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    engine = SyncEngine(db, {"google": google})
+
+    engine.run()
+
+    pending = db.list_pending_matches()
+    assert len(pending) == 1
+    assert pending[0]["contact_data"]["display_name"] == "Jane Smith"
+    assert pending[0]["contact_data"]["emails"] == ["jane@ambiguous.com"]
+
+
 def test_expired_sync_token_triggers_full_resync(db):
     google = FakeAdapter("google", raise_expired_once=True)
     db.set_sync_token("google", "stale-token")

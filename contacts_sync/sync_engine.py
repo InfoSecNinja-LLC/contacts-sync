@@ -1,9 +1,18 @@
+import json
 from dataclasses import dataclass
 from contacts_sync.db import Database
 from contacts_sync.matcher import match_contact, normalize_email, normalize_phone
 from contacts_sync.merger import merge_single_value, merge_multi_value
 from contacts_sync.models import Email, Phone
 from contacts_sync.adapters.base import SyncTokenExpiredError
+
+
+def _contact_to_review_json(contact) -> str:
+    return json.dumps({
+        "display_name": contact.display_name,
+        "emails": [e.value for e in contact.emails],
+        "phones": [p.value for p in contact.phones],
+    })
 
 
 @dataclass
@@ -52,7 +61,12 @@ class SyncEngine:
                         elif match.status == "ambiguous":
                             pending_review += 1
                             if not dry_run:
-                                self._db.save_pending_match(name, change.provider_id, match.candidate_ids, "{}")
+                                self._db.save_pending_match(
+                                    name,
+                                    change.provider_id,
+                                    match.candidate_ids,
+                                    _contact_to_review_json(change.contact),
+                                )
                             continue
                         else:
                             created += 1
