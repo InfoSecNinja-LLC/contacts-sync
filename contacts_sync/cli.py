@@ -107,7 +107,15 @@ def review():
         choice = typer.prompt("Enter contact id to link, or 'skip'")
         if choice == "skip":
             continue
-        db.link_provider(int(choice), match["provider"], match["provider_id"])
+        try:
+            contact_id = int(choice)
+        except ValueError:
+            typer.echo(f"'{choice}' is not a valid contact id or 'skip' — leaving this match pending.")
+            continue
+        if contact_id not in match["candidate_contact_ids"]:
+            typer.echo(f"{contact_id} is not one of the listed candidates — leaving this match pending.")
+            continue
+        db.link_provider(contact_id, match["provider"], match["provider_id"])
         db.delete_pending_match(match["id"])
 
 
