@@ -48,9 +48,20 @@ class SyncEngine:
                     contact_id = self._db.get_link(name, change.provider_id)
 
                     if change.deleted:
-                        if contact_id and not dry_run:
-                            self._db.delete_contact(contact_id)
                         if contact_id:
+                            if not dry_run:
+                                links = self._db.get_links_for_contact(contact_id)
+                                for other_name, other_provider_id in links.items():
+                                    if other_name == name:
+                                        continue
+                                    other_adapter = self._adapters.get(other_name)
+                                    if other_adapter is None:
+                                        continue
+                                    try:
+                                        other_adapter.delete(other_provider_id)
+                                    except Exception as exc:
+                                        errors[other_name] = str(exc)
+                                self._db.delete_contact(contact_id)
                             deleted += 1
                             logger.info(f"DELETE contact_id={contact_id} provider={name} provider_id={change.provider_id}")
                         continue
@@ -110,6 +121,18 @@ class SyncEngine:
         existing_contact.notes = new_notes
         meta["notes"] = new_notes_meta
 
+        new_given_name, new_given_name_meta = merge_single_value(
+            existing_contact.given_name, meta.get("given_name"), incoming.given_name, change.updated_at,
+        )
+        existing_contact.given_name = new_given_name
+        meta["given_name"] = new_given_name_meta
+
+        new_family_name, new_family_name_meta = merge_single_value(
+            existing_contact.family_name, meta.get("family_name"), incoming.family_name, change.updated_at,
+        )
+        existing_contact.family_name = new_family_name
+        meta["family_name"] = new_family_name_meta
+
         existing_contact.emails = [
             Email(value=v)
             for v in merge_multi_value(
@@ -126,7 +149,7 @@ class SyncEngine:
         existing_contact.field_meta = meta
         logger.info(
             f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
-            f"fields=display_name,notes,emails,phones"
+            f"fields=display_name,given_name,family_name,notes,emails,phones"
         )
         if not dry_run:
             self._db.update_contact(existing_contact)

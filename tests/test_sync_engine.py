@@ -19,6 +19,7 @@ class FakeAdapter:
         self._raise_expired_once = raise_expired_once
         self.created = []
         self.updated = []
+        self.deleted = []
 
     def list_changes(self, since_token):
         if self._raise_expired_once and since_token is not None:
@@ -35,7 +36,7 @@ class FakeAdapter:
         self.updated.append((provider_id, contact))
 
     def delete(self, provider_id):
-        pass
+        self.deleted.append(provider_id)
 
 
 def test_new_contact_from_one_provider_is_created_and_pushed_to_others(db):
@@ -78,6 +79,36 @@ def test_matched_contact_merges_emails_across_providers(db):
     assert result.updated == 1
 
 
+def test_matched_contact_merges_structured_name_from_incoming(db):
+    existing_id = db.create_contact(
+        CanonicalContact(
+            display_name="Jane", given_name="Jane", family_name=None, emails=[Email(value="jane@e.com")]
+        )
+    )
+    db.link_provider(existing_id, "google", "g-1")
+
+    incoming = ChangedContact(
+        provider_id="ms-1",
+        contact=CanonicalContact(
+            display_name="Jane Smith",
+            given_name="Jane",
+            family_name="Smith",
+            emails=[Email(value="jane@e.com")],
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+    )
+    google = FakeAdapter("google")
+    microsoft = FakeAdapter("microsoft", changes=[incoming])
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result = engine.run()
+
+    updated_contact = db.get_contact(existing_id)
+    assert updated_contact.given_name == "Jane"
+    assert updated_contact.family_name == "Smith"
+    assert result.updated == 1
+
+
 def test_deleted_contact_is_removed_locally(db):
     existing_id = db.create_contact(CanonicalContact(display_name="Jane"))
     db.link_provider(existing_id, "google", "g-1")
@@ -87,6 +118,67 @@ def test_deleted_contact_is_removed_locally(db):
 
     result = engine.run()
 
+    assert db.get_contact(existing_id) is None
+    assert result.deleted == 1
+
+
+def test_delete_propagates_to_other_linked_providers(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane"))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+    db.link_provider(existing_id, "icloud", "ic-1")
+
+    deletion = ChangedContact(provider_id="g-1", contact=None, updated_at="", deleted=True)
+    google = FakeAdapter("google", changes=[deletion])
+    microsoft = FakeAdapter("microsoft")
+    icloud = FakeAdapter("icloud")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft, "icloud": icloud})
+
+    result = engine.run()
+
+    assert microsoft.deleted == ["ms-1"]
+    assert icloud.deleted == ["ic-1"]
+    assert google.deleted == []
+    assert db.get_contact(existing_id) is None
+    assert result.deleted == 1
+
+
+def test_dry_run_does_not_propagate_deletes(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane"))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    deletion = ChangedContact(provider_id="g-1", contact=None, updated_at="", deleted=True)
+    google = FakeAdapter("google", changes=[deletion])
+    microsoft = FakeAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result = engine.run(dry_run=True)
+
+    assert microsoft.deleted == []
+    assert db.get_contact(existing_id) is not None
+    assert result.deleted == 1
+
+
+def test_delete_propagation_failure_is_isolated_to_other_provider(db):
+    class ExplodingDeleteAdapter(FakeAdapter):
+        def delete(self, provider_id):
+            raise RuntimeError("delete boom")
+
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane"))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    deletion = ChangedContact(provider_id="g-1", contact=None, updated_at="", deleted=True)
+    google = FakeAdapter("google", changes=[deletion])
+    microsoft = ExplodingDeleteAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result = engine.run()
+
+    assert "microsoft" in result.provider_errors
+    assert "delete boom" in result.provider_errors["microsoft"]
+    assert "google" not in result.provider_errors
     assert db.get_contact(existing_id) is None
     assert result.deleted == 1
 
