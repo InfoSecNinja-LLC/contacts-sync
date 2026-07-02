@@ -19,7 +19,7 @@ from contacts_sync.auth.onepassword import op_read, op_set_field, OnePasswordErr
 
 AUTHORITY = "https://login.microsoftonline.com/consumers"
 SCOPES = ["Contacts.ReadWrite"]
-VAULT = "contacts-sync"
+VAULT = "Private"
 
 
 def _load_cache() -> msal.SerializableTokenCache:

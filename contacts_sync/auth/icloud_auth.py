@@ -17,7 +17,7 @@ import getpass
 
 from contacts_sync.auth.onepassword import op_read, op_set_field, OnePasswordError
 
-VAULT = "contacts-sync"
+VAULT = "Private"
 
 
 def run_icloud_auth() -> None:
