@@ -58,3 +58,18 @@ def test_delete_logs_contact_id_and_provider(db, caplog):
         engine.run()
 
     assert any("DELETE" in r.message and str(contact_id) in r.message for r in caplog.records)
+
+
+def test_configure_logging_is_idempotent():
+    from contacts_sync.cli import _configure_logging
+
+    logger = logging.getLogger("contacts_sync.sync")
+    original_handlers = list(logger.handlers)
+    try:
+        logger.handlers = []
+        _configure_logging()
+        _configure_logging()
+        _configure_logging()
+        assert len(logger.handlers) == 1
+    finally:
+        logger.handlers = original_handlers

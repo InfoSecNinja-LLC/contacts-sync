@@ -12,9 +12,10 @@ from contacts_sync.adapters.icloud import ICloudAdapter
 def _configure_logging():
     logger = logging.getLogger("contacts_sync.sync")
     logger.setLevel(logging.INFO)
-    handler = logging.FileHandler("sync.log")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-    logger.addHandler(handler)
+    if not logger.handlers:
+        handler = logging.FileHandler("sync.log")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger.addHandler(handler)
 
 
 app = typer.Typer()
