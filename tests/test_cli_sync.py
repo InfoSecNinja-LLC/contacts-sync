@@ -47,3 +47,17 @@ def test_sync_exits_nonzero_on_provider_error(mocker, tmp_path):
 
     assert result.exit_code == 1
     assert "boom" in result.stdout
+
+
+def test_sync_exits_cleanly_when_credentials_missing(mocker, tmp_path):
+    mocker.patch("contacts_sync.cli.DB_PATH", str(tmp_path / "contacts.db"))
+    mocker.patch(
+        "contacts_sync.cli._build_adapters",
+        side_effect=RuntimeError("No Google credentials found. Run `contacts-sync auth google` first."),
+    )
+
+    result = runner.invoke(app, ["sync", "--microsoft-client-id", "cid-1"])
+
+    assert result.exit_code == 1
+    assert "No Google credentials found" in result.stdout
+    assert result.exception is None or not isinstance(result.exception, RuntimeError)

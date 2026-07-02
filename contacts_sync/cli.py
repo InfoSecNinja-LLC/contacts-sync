@@ -60,7 +60,12 @@ def sync(
 ):
     db = Database(DB_PATH)
     db.migrate()
-    adapters = _build_adapters(microsoft_client_id)
+    try:
+        adapters = _build_adapters(microsoft_client_id)
+    except RuntimeError as exc:
+        typer.echo(f"ERROR: {exc}")
+        raise typer.Exit(code=1)
+
     engine = SyncEngine(db, adapters)
     result = engine.run(dry_run=dry_run)
 
