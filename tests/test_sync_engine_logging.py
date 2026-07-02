@@ -60,6 +60,33 @@ def test_delete_logs_contact_id_and_provider(db, caplog):
     assert any("DELETE" in r.message and str(contact_id) in r.message for r in caplog.records)
 
 
+def test_configure_logging_writes_unicode_contact_names_without_error(db, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from contacts_sync.cli import _configure_logging
+
+    logger = logging.getLogger("contacts_sync.sync")
+    original_handlers = list(logger.handlers)
+    logger.handlers = []
+    try:
+        _configure_logging()
+        incoming = ChangedContact(
+            provider_id="g-1",
+            contact=CanonicalContact(display_name="Neha \U0001fab7 Villa Plumeria", emails=[Email(value="n@e.com")]),
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        google = FakeAdapter("google", changes=[incoming])
+        engine = SyncEngine(db, {"google": google})
+
+        engine.run()
+
+        log_content = (tmp_path / "sync.log").read_text(encoding="utf-8")
+        assert "Neha \U0001fab7 Villa Plumeria" in log_content
+    finally:
+        for handler in logger.handlers:
+            handler.close()
+        logger.handlers = original_handlers
+
+
 def test_configure_logging_is_idempotent():
     from contacts_sync.cli import _configure_logging
 

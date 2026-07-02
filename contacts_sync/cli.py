@@ -13,7 +13,7 @@ def _configure_logging():
     logger = logging.getLogger("contacts_sync.sync")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
-        handler = logging.FileHandler("sync.log")
+        handler = logging.FileHandler("sync.log", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         logger.addHandler(handler)
 
