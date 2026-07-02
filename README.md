@@ -42,7 +42,7 @@ Set `CONTACTS_SYNC_MS_CLIENT_ID` in your environment to avoid passing `--microso
 
 - **Google and iCloud credentials are checked eagerly before a sync starts** — if either hasn't been set up yet (`contacts-sync auth <provider>` not run), `sync` fails immediately with an error like `No Google credentials found. Run 'contacts-sync auth google' first.`, even if you only care about syncing the other two right now. This is documented, deliberate v1 behavior, not a bug. **Microsoft credentials are checked lazily instead**: a missing/invalid Microsoft credential is not caught up front, so `sync` still runs and syncs Google/iCloud successfully, reporting the Microsoft failure separately in the summary — the same per-provider isolation used for other mid-sync failures (e.g. an expired token, a network error). Run `contacts-sync doctor` to check all three providers' credentials up front without running a real sync.
 - Photo sync is not implemented.
-- Address fields are read but not merged/pushed yet.
+- Postal addresses are modeled in the local database (`addresses` table) but no provider adapter reads or writes them yet — this is unimplemented, not just unmerged.
 - The iCloud CardDAV addressbook path is hardcoded to Apple's common default (`/carddavhome/addressbooks/card/`) rather than discovered per-account, so it may not work for every Apple ID.
 - No scheduler is built in — run `contacts-sync sync` manually or via your OS's task scheduler/cron.
 
