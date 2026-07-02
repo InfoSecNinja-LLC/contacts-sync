@@ -35,6 +35,20 @@ SYNC_COLLECTION_BODY = """<?xml version="1.0" encoding="utf-8" ?>
   </D:prop>
 </C:sync-collection>"""
 
+PRINCIPAL_PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:current-user-principal/>
+  </D:prop>
+</D:propfind>"""
+
+ADDRESSBOOK_HOME_PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <C:addressbook-home-set/>
+  </D:prop>
+</D:propfind>"""
+
 
 class ICloudAdapter:
     name = "icloud"
@@ -132,6 +146,68 @@ def _parse_multistatus(xml_text: str):
 def _extract_sync_token(xml_text: str) -> str:
     root = ET.fromstring(xml_text)
     return root.findtext("D:sync-token", default="", namespaces=NS)
+
+
+def _extract_propstat_href(xml_text: str, property_path: str) -> str:
+    """Navigate a PROPFIND multistatus response to find a D:href nested under
+    the given property (e.g. "D:current-user-principal" or
+    "C:addressbook-home-set"). The href is a child element of the property,
+    not the property's own text content, per RFC 4918/6764.
+    """
+    root = ET.fromstring(xml_text)
+    for response in root.findall("D:response", NS):
+        propstat = response.find("D:propstat", NS)
+        if propstat is None:
+            continue
+        prop_element = propstat.find(f"D:prop/{property_path}", NS)
+        if prop_element is None:
+            continue
+        href = prop_element.findtext("D:href", default="", namespaces=NS)
+        if href:
+            return href
+    return ""
+
+
+def discover_addressbook_path(apple_id: str, app_password: str) -> str:
+    """Discover this account's real CardDAV addressbook path via RFC 6764 principal lookup.
+
+    Replaces guessing a hardcoded path (which only works for some accounts) with
+    the standard two-step discovery: current-user-principal, then addressbook-home-set.
+    Raises RuntimeError with a clear message if either step fails or the expected
+    property is missing from the response.
+    """
+    auth = (apple_id, app_password)
+
+    principal_response = request_with_retry(
+        "PROPFIND",
+        BASE_URL + "/",
+        data=PRINCIPAL_PROPFIND_BODY,
+        auth=auth,
+        headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
+    )
+    principal_response.raise_for_status()
+    principal_href = _extract_propstat_href(principal_response.text, "D:current-user-principal")
+    if not principal_href:
+        raise RuntimeError(
+            "Could not discover iCloud CardDAV principal URL — the account may not "
+            "support CardDAV, or the app-specific password may be invalid."
+        )
+
+    home_response = request_with_retry(
+        "PROPFIND",
+        BASE_URL + principal_href,
+        data=ADDRESSBOOK_HOME_PROPFIND_BODY,
+        auth=auth,
+        headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
+    )
+    home_response.raise_for_status()
+    home_href = _extract_propstat_href(home_response.text, "C:addressbook-home-set")
+    if not home_href:
+        raise RuntimeError(
+            "Could not discover iCloud CardDAV addressbook home — the principal "
+            "response didn't include an addressbook-home-set."
+        )
+    return home_href
 
 
 def _to_canonical(vcard) -> CanonicalContact:

@@ -1,6 +1,12 @@
 import pytest
 import vobject
-from contacts_sync.adapters.icloud import ICloudAdapter, _parse_multistatus, _to_canonical, _to_vcard
+from contacts_sync.adapters.icloud import (
+    ICloudAdapter,
+    _parse_multistatus,
+    _to_canonical,
+    _to_vcard,
+    discover_addressbook_path,
+)
 from contacts_sync.adapters.base import SyncTokenExpiredError
 from contacts_sync.models import CanonicalContact, Email
 
@@ -210,3 +216,115 @@ END:VCARD
     names = {c.contact.display_name for c in change_set.changes}
     assert names == {"Jane Doe", "Bob Jones", "Carol White"}
     assert change_set.next_sync_token == "https://contacts.icloud.com/sync/3"
+
+
+def test_discover_addressbook_path_follows_principal_then_home_set(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:addressbook-home-set>
+          <D:href>/1234567890/carddavhome/</D:href>
+        </C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    assert path == "/1234567890/carddavhome/"
+
+
+def test_discover_addressbook_path_raises_when_principal_missing(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop/>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    with pytest.raises(RuntimeError, match="principal"):
+        discover_addressbook_path("me@icloud.com", "app-pass")
+
+
+def test_discover_addressbook_path_raises_when_home_set_missing(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop/>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    with pytest.raises(RuntimeError, match="addressbook"):
+        discover_addressbook_path("me@icloud.com", "app-pass")
+
+
+def test_discover_addressbook_path_raises_on_auth_failure(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        status_code=401,
+        text="Unauthorized",
+    )
+
+    with pytest.raises(Exception):
+        discover_addressbook_path("me@icloud.com", "bad-pass")
