@@ -79,5 +79,51 @@ def sync(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def status():
+    db = Database(DB_PATH)
+    db.migrate()
+    contacts = db.list_contacts()
+    typer.echo(f"{len(contacts)} contacts in local store.")
+    for provider in ("google", "microsoft", "icloud"):
+        token = db.get_sync_token(provider)
+        typer.echo(f"{provider}: sync token {'set' if token else 'not set'}")
+
+
+@app.command()
+def review():
+    db = Database(DB_PATH)
+    db.migrate()
+    pending = db.list_pending_matches()
+    if not pending:
+        typer.echo("No pending matches to review.")
+        return
+    for match in pending:
+        typer.echo(f"\nProvider {match['provider']} contact {match['provider_id']} could be:")
+        for candidate_id in match["candidate_contact_ids"]:
+            candidate = db.get_contact(candidate_id)
+            name = candidate.display_name if candidate else "(deleted)"
+            typer.echo(f"  [{candidate_id}] {name}")
+        choice = typer.prompt("Enter contact id to link, or 'skip'")
+        if choice == "skip":
+            continue
+        db.link_provider(int(choice), match["provider"], match["provider_id"])
+        db.delete_pending_match(match["id"])
+
+
+@app.command()
+def doctor(microsoft_client_id: str = typer.Option(None, envvar="CONTACTS_SYNC_MS_CLIENT_ID")):
+    for provider, check in (
+        ("google", lambda: google_auth.get_credentials()),
+        ("icloud", lambda: icloud_auth.get_credentials()),
+        ("microsoft", lambda: microsoft_auth.get_token_provider(microsoft_client_id)()),
+    ):
+        try:
+            check()
+            typer.echo(f"{provider}: OK")
+        except Exception as exc:
+            typer.echo(f"{provider}: FAILED ({exc})")
+
+
 if __name__ == "__main__":
     app()
