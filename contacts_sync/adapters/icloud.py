@@ -73,7 +73,17 @@ class ICloudAdapter:
             href,
             data=vcard.serialize(),
             auth=self._auth,
-            headers={"Content-Type": "text/vcard; charset=utf-8"},
+            headers={
+                "Content-Type": "text/vcard; charset=utf-8",
+                # Only create if no resource currently exists at this URL. This is
+                # the standard WebDAV/CardDAV mechanism for guarding against
+                # silently overwriting a stray/unlinked resource left over from a
+                # prior partial sync or a manually created contact with a
+                # colliding filename. If the server already has a resource here,
+                # it responds 412 Precondition Failed, which raise_for_status()
+                # below turns into a clear HTTPError.
+                "If-None-Match": '"*"',
+            },
         )
         response.raise_for_status()
         return href
@@ -100,8 +110,13 @@ def _parse_multistatus(xml_text: str):
     for response in root.findall("D:response", NS):
         href = response.findtext("D:href", default="", namespaces=NS)
         propstat = response.find("D:propstat", NS)
+        # No propstat means this D:response is a deleted-resource entry per RFC
+        # 6578's typical shape (status is a direct child of D:response, not
+        # nested under propstat). We deliberately treat "no propstat" as
+        # "deleted" via this hardcoded fallback rather than parsing a status
+        # value in that branch.
         status = propstat.findtext("D:status", default="200", namespaces=NS) if propstat is not None else "404"
-        status_code = status.split(" ")[1] if " " in status else status
+        status_code = status.split()[1] if len(status.split()) > 1 else status
         etag = propstat.findtext("D:prop/D:getetag", default="", namespaces=NS) if propstat is not None else ""
         address_data = (
             propstat.findtext("D:prop/C:address-data", default="", namespaces=NS)
@@ -120,8 +135,15 @@ def _extract_sync_token(xml_text: str) -> str:
 def _to_canonical(vcard) -> CanonicalContact:
     emails = [Email(value=e.value) for e in getattr(vcard, "email_list", [])]
     phones = [Phone(value=t.value) for t in getattr(vcard, "tel_list", [])]
+    given_name = None
+    family_name = None
+    if hasattr(vcard, "n"):
+        given_name = vcard.n.value.given or None
+        family_name = vcard.n.value.family or None
     return CanonicalContact(
         display_name=vcard.fn.value if hasattr(vcard, "fn") else "",
+        given_name=given_name,
+        family_name=family_name,
         emails=emails,
         phones=phones,
         notes=vcard.note.value if hasattr(vcard, "note") else None,
