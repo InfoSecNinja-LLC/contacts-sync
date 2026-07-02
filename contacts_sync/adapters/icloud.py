@@ -16,10 +16,10 @@ default. Do not change this back to stdlib XML.
 """
 
 import defusedxml.ElementTree as ET
-import requests
 import vobject
 
 from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
+from contacts_sync.http_retry import request_with_retry
 from contacts_sync.models import CanonicalContact, Email, Phone
 
 BASE_URL = "https://contacts.icloud.com"
@@ -45,7 +45,7 @@ class ICloudAdapter:
 
     def list_changes(self, since_token):
         body = SYNC_COLLECTION_BODY.format(sync_token=since_token or "")
-        response = requests.request(
+        response = request_with_retry(
             "REPORT",
             self._addressbook_url,
             data=body,
@@ -69,7 +69,8 @@ class ICloudAdapter:
     def create(self, contact: CanonicalContact) -> str:
         vcard = _to_vcard(contact)
         href = f"{self._addressbook_url}{contact.id}.vcf"
-        response = requests.put(
+        response = request_with_retry(
+            "PUT",
             href,
             data=vcard.serialize(),
             auth=self._auth,
@@ -90,7 +91,8 @@ class ICloudAdapter:
 
     def update(self, provider_id: str, contact: CanonicalContact) -> None:
         vcard = _to_vcard(contact)
-        response = requests.put(
+        response = request_with_retry(
+            "PUT",
             provider_id,
             data=vcard.serialize(),
             auth=self._auth,
@@ -99,7 +101,7 @@ class ICloudAdapter:
         response.raise_for_status()
 
     def delete(self, provider_id: str) -> None:
-        response = requests.delete(provider_id, auth=self._auth)
+        response = request_with_retry("DELETE", provider_id, auth=self._auth)
         if response.status_code not in (204, 404):
             response.raise_for_status()
 

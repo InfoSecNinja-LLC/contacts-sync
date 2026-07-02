@@ -27,7 +27,7 @@ class GoogleAdapter:
             while True:
                 if page_token:
                     request_args["pageToken"] = page_token
-                response = self._service.people().connections().list(**request_args).execute()
+                response = self._service.people().connections().list(**request_args).execute(num_retries=5)
                 for person in response.get("connections", []):
                     if person.get("metadata", {}).get("deleted"):
                         changes.append(
@@ -56,17 +56,17 @@ class GoogleAdapter:
 
     def create(self, contact: CanonicalContact) -> str:
         body = _to_person(contact)
-        response = self._service.people().createContact(body=body).execute()
+        response = self._service.people().createContact(body=body).execute(num_retries=5)
         return response["resourceName"]
 
     def update(self, provider_id: str, contact: CanonicalContact) -> None:
         body = _to_person(contact)
         self._service.people().updateContact(
             resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
-        ).execute()
+        ).execute(num_retries=5)
 
     def delete(self, provider_id: str) -> None:
-        self._service.people().deleteContact(resourceName=provider_id).execute()
+        self._service.people().deleteContact(resourceName=provider_id).execute(num_retries=5)
 
 
 def _to_canonical(person: dict) -> CanonicalContact:

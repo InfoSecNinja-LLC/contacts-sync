@@ -7,9 +7,8 @@ callable (see `contacts_sync.auth.microsoft_auth.get_token_provider`) and
 calls it to get a fresh bearer token per request.
 """
 
-import requests
-
 from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
+from contacts_sync.http_retry import request_with_retry
 from contacts_sync.models import CanonicalContact, Email, Phone
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -39,7 +38,7 @@ class MicrosoftAdapter:
         changes = []
         next_token = since_token
         while url:
-            response = requests.get(url, headers=self._headers(), params=params)
+            response = request_with_retry("GET", url, headers=self._headers(), params=params)
             params = None
             if response.status_code == 410:
                 raise SyncTokenExpiredError("Microsoft delta token expired (syncStateNotFound)")
@@ -63,18 +62,20 @@ class MicrosoftAdapter:
         return ChangeSet(changes=changes, next_sync_token=next_token)
 
     def create(self, contact: CanonicalContact) -> str:
-        response = requests.post(f"{GRAPH_BASE}/me/contacts", headers=self._headers(), json=_to_graph(contact))
+        response = request_with_retry(
+            "POST", f"{GRAPH_BASE}/me/contacts", headers=self._headers(), json=_to_graph(contact)
+        )
         response.raise_for_status()
         return response.json()["id"]
 
     def update(self, provider_id: str, contact: CanonicalContact) -> None:
-        response = requests.patch(
-            f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers(), json=_to_graph(contact)
+        response = request_with_retry(
+            "PATCH", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers(), json=_to_graph(contact)
         )
         response.raise_for_status()
 
     def delete(self, provider_id: str) -> None:
-        response = requests.delete(f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers())
+        response = request_with_retry("DELETE", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers())
         if response.status_code not in (204, 404):
             response.raise_for_status()
 
