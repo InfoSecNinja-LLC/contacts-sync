@@ -258,7 +258,127 @@ def test_discover_addressbook_path_follows_principal_then_home_set(requests_mock
 
     path = discover_addressbook_path("me@icloud.com", "app-pass")
 
-    assert path == "/1234567890/carddavhome/"
+    # discover_addressbook_path always returns a fully-resolved absolute URL,
+    # even when the underlying hrefs were relative paths, so ICloudAdapter
+    # never has to guess which form it received.
+    assert path == f"{BASE}/1234567890/carddavhome/"
+
+
+def test_discover_addressbook_path_resolves_absolute_url_href(requests_mock):
+    """Regression test: Apple's CardDAV server returns the addressbook-home-set
+    href as a FULL absolute URL pointing at a per-account sharded hostname
+    (e.g. p119-contacts.icloud.com), not a path relative to contacts.icloud.com.
+    discover_addressbook_path must resolve this correctly via urljoin rather
+    than naively concatenating it onto BASE_URL (which previously produced a
+    mangled URL like "https://contacts.icloud.comhttps://p119-...").
+    """
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:addressbook-home-set>
+          <D:href>https://p119-contacts.icloud.com:443/877060579/carddavhome/</D:href>
+        </C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    assert path == "https://p119-contacts.icloud.com:443/877060579/carddavhome/"
+
+
+def test_discover_addressbook_path_resolves_absolute_url_principal_href(requests_mock):
+    """Defensive test for the same class of bug on the FIRST hop: if the
+    current-user-principal href is itself returned as a full absolute URL
+    (rather than a relative path), the second PROPFIND request must be sent
+    to that resolved URL, not a mangled BASE_URL + href concatenation.
+    """
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>https://p119-contacts.icloud.com:443/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", "https://p119-contacts.icloud.com:443/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:addressbook-home-set>
+          <D:href>/1234567890/carddavhome/</D:href>
+        </C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    # The second-hop href was relative, but it must resolve against the
+    # sharded principal URL from the first hop, not against BASE_URL.
+    assert path == "https://p119-contacts.icloud.com:443/1234567890/carddavhome/"
+
+
+def test_icloud_adapter_uses_full_absolute_url_addressbook_path_as_is(requests_mock):
+    """Regression test: when ICloudAdapter is constructed with a FULL absolute
+    URL as addressbook_path (as discover_addressbook_path now returns for
+    per-account sharded servers), it must use that URL as-is rather than
+    re-prepending BASE_URL (which would produce a mangled URL like
+    "https://contacts.icloud.comhttps://p119-...").
+    """
+    sharded_addressbook = "https://p119-contacts.icloud.com:443/877060579/carddavhome/"
+    requests_mock.register_uri("REPORT", sharded_addressbook, text=SYNC_RESPONSE, status_code=207)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", sharded_addressbook)
+
+    change_set = adapter.list_changes(None)
+
+    assert requests_mock.last_request.url == sharded_addressbook
+    assert len(change_set.changes) == 1
 
 
 def test_discover_addressbook_path_raises_when_principal_missing(requests_mock):

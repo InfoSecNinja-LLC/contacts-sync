@@ -15,6 +15,8 @@ stdlib XML parsers are vulnerable to XXE and billion-laughs attacks by
 default. Do not change this back to stdlib XML.
 """
 
+from urllib.parse import urljoin
+
 import defusedxml.ElementTree as ET
 import requests
 import vobject
@@ -55,8 +57,19 @@ class ICloudAdapter:
     name = "icloud"
 
     def __init__(self, apple_id: str, app_password: str, addressbook_path: str):
+        """`addressbook_path` may be either a bare path (e.g.
+        "/carddavhome/addressbooks/card/") relative to BASE_URL, or a full
+        absolute URL (e.g. "https://p119-contacts.icloud.com:443/.../carddavhome/").
+        Apple's CardDAV discovery (see `discover_addressbook_path`) returns a
+        full absolute URL when the account's addressbook lives on a
+        per-account sharded server rather than contacts.icloud.com itself, so
+        both forms must be accepted here.
+        """
         self._auth = (apple_id, app_password)
-        self._addressbook_url = f"{BASE_URL}{addressbook_path}"
+        if addressbook_path.startswith("http://") or addressbook_path.startswith("https://"):
+            self._addressbook_url = addressbook_path
+        else:
+            self._addressbook_url = f"{BASE_URL}{addressbook_path}"
 
     def list_changes(self, since_token):
         body = SYNC_COLLECTION_BODY.format(sync_token=since_token or "")
@@ -200,11 +213,18 @@ def discover_addressbook_path(apple_id: str, app_password: str) -> str:
             "Could not discover iCloud CardDAV principal URL — the account may not "
             "support CardDAV, or the app-specific password may be invalid."
         )
+    # Per RFC 4918, a DAV:href value MAY be a full absolute URI or a
+    # path-only relative reference. urljoin handles both: if principal_href
+    # is already absolute it's returned unchanged; if relative, it's joined
+    # against BASE_URL. Naively concatenating BASE_URL + principal_href would
+    # mangle the URL in the absolute case (e.g.
+    # "https://contacts.icloud.comhttps://p119-...").
+    principal_url = urljoin(BASE_URL + "/", principal_href)
 
     try:
         home_response = request_with_retry(
             "PROPFIND",
-            BASE_URL + principal_href,
+            principal_url,
             data=ADDRESSBOOK_HOME_PROPFIND_BODY,
             auth=auth,
             headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
@@ -222,7 +242,12 @@ def discover_addressbook_path(apple_id: str, app_password: str) -> str:
             "Could not discover iCloud CardDAV addressbook home — the principal "
             "response didn't include an addressbook-home-set."
         )
-    return home_href
+    # Apple's CardDAV server frequently returns this href as a FULL absolute
+    # URL pointing at a per-account sharded hostname (e.g.
+    # p119-contacts.icloud.com), not a path relative to contacts.icloud.com.
+    # Resolve via urljoin so the caller always receives a usable absolute URL
+    # regardless of which form the server chose.
+    return urljoin(principal_url, home_href)
 
 
 def _to_canonical(vcard) -> CanonicalContact:
