@@ -99,6 +99,13 @@ class ICloudAdapter:
             if status.startswith("404"):
                 changes.append(ChangedContact(provider_id=href, contact=None, updated_at="", deleted=True))
                 continue
+            if not address_data:
+                # Not a vCard resource — e.g. the addressbook collection's own
+                # entry in the multistatus (RFC 6578 includes the collection
+                # itself alongside member resources; its propstat/prop has no
+                # C:address-data since a collection isn't a vCard). Skip it
+                # rather than crashing the whole sync run on vobject.readOne("").
+                continue
             vcard = vobject.readOne(address_data)
             changes.append(ChangedContact(provider_id=href, contact=_to_canonical(vcard), updated_at=""))
 

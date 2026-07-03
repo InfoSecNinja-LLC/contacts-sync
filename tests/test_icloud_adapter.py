@@ -237,6 +237,53 @@ END:VCARD
     assert change_set.next_sync_token == "https://contacts.icloud.com/sync/3"
 
 
+def test_list_changes_skips_collection_self_entry_with_no_address_data(requests_mock):
+    """Real-world bug: a real iCloud sync-collection REPORT response includes
+    an extra <D:response> entry representing the addressbook COLLECTION
+    resource itself (per RFC 6578), alongside entries for each member vCard.
+    This entry's propstat/prop only has <D:getetag>, no <C:address-data>, so
+    _parse_multistatus's address_data comes back as "" for it. list_changes
+    must skip this entry rather than calling vobject.readOne(""), which
+    raises StopIteration (whose str() is confusingly empty, producing the
+    "ERROR [icloud]: " symptom seen live with nothing after the colon).
+    """
+    response_with_collection_entry = """<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/carddavhome/addressbooks/card</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"collection-etag"</D:getetag>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/carddavhome/addressbooks/card/jane.vcf</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"etag-1"</D:getetag>
+        <C:address-data>BEGIN:VCARD
+VERSION:3.0
+FN:Jane Doe
+EMAIL:jane@example.com
+END:VCARD
+</C:address-data>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:sync-token>https://contacts.icloud.com/sync/2</D:sync-token>
+</D:multistatus>"""
+    requests_mock.register_uri("REPORT", f"{BASE}{ADDRESSBOOK}", text=response_with_collection_entry, status_code=207)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+
+    change_set = adapter.list_changes(None)
+
+    assert len(change_set.changes) == 1
+    assert change_set.changes[0].contact.display_name == "Jane Doe"
+
+
 def _is_depth(depth):
     def matcher(request):
         return request.headers.get("Depth") == depth
