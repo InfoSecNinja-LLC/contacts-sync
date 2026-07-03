@@ -58,6 +58,60 @@ def test_list_changes_captures_etag_into_extra(mocker):
     assert change_set.changes[0].contact.extra["google_etag"] == "%EgUBAj0CBy4="
 
 
+def test_list_changes_populates_changed_contact_etag(mocker):
+    service = _fake_service(
+        mocker,
+        {"connections": [FAKE_PERSON], "nextSyncToken": "sync-2"},
+    )
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].etag == "%EgUBAj0CBy4="
+
+
+def test_update_returns_new_etag_from_response(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.updateContact.return_value.execute.return_value = {"etag": "etag-after-update"}
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    result = adapter.update("people/123", CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+    assert result == "etag-after-update"
+
+
+def test_update_returns_fresh_etag_from_retry_response(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.updateContact.return_value.execute.side_effect = [
+        _fake_http_error(400, message=b"Request person.etag is different than the current person.etag."),
+        {"etag": "etag-from-retry"},
+    ]
+    people.get.return_value.execute.return_value = {
+        "resourceName": "people/123",
+        "etag": "fresh-etag-xyz",
+        "names": [{"displayName": "Jane"}],
+    }
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    contact = CanonicalContact(
+        display_name="Jane", emails=[Email(value="j@e.com")], extra={"google_etag": "stale-etag"}
+    )
+    result = adapter.update("people/123", contact)
+
+    assert result == "etag-from-retry"
+
+
 def test_list_changes_flags_deleted_contacts(mocker):
     deleted_person = {"resourceName": "people/456", "metadata": {"deleted": True}}
     service = _fake_service(mocker, {"connections": [deleted_person], "nextSyncToken": "sync-3"})
@@ -122,15 +176,18 @@ def test_create_sends_person_and_returns_resource_name(mocker):
     from contacts_sync.models import CanonicalContact, Email
 
     people = mocker.Mock()
-    people.createContact.return_value.execute.return_value = {"resourceName": "people/789"}
+    people.createContact.return_value.execute.return_value = {
+        "resourceName": "people/789",
+        "etag": "etag-created",
+    }
     service = mocker.Mock()
     service.people.return_value = people
     mocker.patch("contacts_sync.adapters.google.build", return_value=service)
     adapter = GoogleAdapter(credentials=mocker.Mock())
 
-    resource_name = adapter.create(CanonicalContact(display_name="New Person", emails=[Email(value="n@e.com")]))
+    result = adapter.create(CanonicalContact(display_name="New Person", emails=[Email(value="n@e.com")]))
 
-    assert resource_name == "people/789"
+    assert result == ("people/789", "etag-created")
     people.createContact.assert_called_once()
 
 

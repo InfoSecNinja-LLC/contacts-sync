@@ -12,11 +12,21 @@ def db(tmp_path):
 
 
 class FakeAdapter:
-    def __init__(self, name, changes=None, next_token="tok-1", raise_expired_once=False):
+    def __init__(
+        self,
+        name,
+        changes=None,
+        next_token="tok-1",
+        raise_expired_once=False,
+        create_etag="etag-created",
+        update_etag="etag-updated",
+    ):
         self.name = name
         self._changes = changes or []
         self._next_token = next_token
         self._raise_expired_once = raise_expired_once
+        self._create_etag = create_etag
+        self._update_etag = update_etag
         self.created = []
         self.updated = []
         self.deleted = []
@@ -30,10 +40,11 @@ class FakeAdapter:
     def create(self, contact):
         provider_id = f"{self.name}-new-{len(self.created)}"
         self.created.append(contact)
-        return provider_id
+        return provider_id, self._create_etag
 
     def update(self, provider_id, contact):
         self.updated.append((provider_id, contact))
+        return self._update_etag
 
     def delete(self, provider_id):
         self.deleted.append(provider_id)
@@ -315,6 +326,144 @@ def test_unlinked_provider_gets_create_even_if_not_dirty(db):
     assert len(microsoft.created) == 1
     assert microsoft.created[0].display_name == "Jane"
     assert google.updated == []
+
+
+def test_pulled_change_with_matching_etag_is_skipped_as_echo(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+    db.set_link_etag("google", "g-1", "E1")
+
+    # The pull returns our own contact back with the SAME etag we recorded.
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(
+            display_name="DIFFERENT NAME SHOULD NOT BE MERGED",
+            emails=[Email(value="should-not-merge@e.com")],
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+        etag="E1",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    engine = SyncEngine(db, {"google": google})
+
+    result = engine.run()
+
+    # Not merged: the stored contact is untouched.
+    stored = db.get_contact(existing_id)
+    assert stored.display_name == "Jane"
+    assert {e.value for e in stored.emails} == {"jane@e.com"}
+    # Not counted as updated, not re-pushed.
+    assert result.updated == 0
+    assert google.updated == []
+
+
+def test_pulled_change_with_different_etag_is_processed(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+    db.set_link_etag("google", "g-1", "E1")
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com"), Email(value="jane.new@e.com")],
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+        etag="E2",
+    )
+    google = FakeAdapter("google", changes=[incoming], update_etag="E2-pushed")
+    engine = SyncEngine(db, {"google": google})
+
+    result = engine.run()
+
+    stored = db.get_contact(existing_id)
+    assert {e.value for e in stored.emails} == {"jane@e.com", "jane.new@e.com"}
+    assert result.updated == 1
+    # The merge dirtied the contact, so it was pushed back to google and the
+    # link etag now reflects that write - not the stale "E1" it started with.
+    assert db.get_link_etag("google", "g-1") == "E2-pushed"
+    assert [pid for pid, _ in google.updated] == ["g-1"]
+
+
+def test_push_update_records_returned_etag(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    # A change on google dirties the contact; the microsoft push then updates.
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com"), Email(value="jane.new@e.com")],
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+        etag="E2",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    microsoft = FakeAdapter("microsoft", update_etag="E-new")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    engine.run()
+
+    assert db.get_link_etag("microsoft", "ms-1") == "E-new"
+
+
+def test_push_create_records_returned_etag(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+
+    google = FakeAdapter("google")
+    microsoft = FakeAdapter("microsoft", create_etag="E-created")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    engine.run()
+
+    # A new link to microsoft was created for the contact.
+    links = db.get_links_for_contact(existing_id)
+    assert "microsoft" in links
+    assert db.get_link_etag("microsoft", links["microsoft"]) == "E-created"
+
+
+def test_echo_after_own_write_is_suppressed_end_to_end(db):
+    # Run 1: a new google contact is created and pushed to microsoft.
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]),
+        updated_at="2026-01-01T00:00:00Z",
+        etag="G1",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    microsoft = FakeAdapter("microsoft", create_etag="M1")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result1 = engine.run()
+    assert result1.created == 1
+    assert len(microsoft.created) == 1
+
+    contact_id = db.get_link("google", "g-1")
+    ms_links = db.get_links_for_contact(contact_id)
+    ms_provider_id = ms_links["microsoft"]
+    # The etag microsoft's create returned was recorded so its echo is suppressed.
+    assert db.get_link_etag("microsoft", ms_provider_id) == "M1"
+
+    # Run 2: microsoft's next pull echoes back the contact we just wrote there,
+    # carrying the same etag "M1" it assigned. It must be suppressed.
+    echo = ChangedContact(
+        provider_id=ms_provider_id,
+        contact=CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]),
+        updated_at="2026-01-02T00:00:00Z",
+        etag="M1",
+    )
+    google2 = FakeAdapter("google")
+    microsoft2 = FakeAdapter("microsoft", changes=[echo])
+    engine2 = SyncEngine(db, {"google": google2, "microsoft": microsoft2})
+
+    result2 = engine2.run()
+
+    assert result2.updated == 0
+    assert microsoft2.updated == []
+    assert google2.updated == []
 
 
 def test_provider_error_is_isolated_and_reported(db):

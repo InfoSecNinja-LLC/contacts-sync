@@ -55,13 +55,56 @@ def test_list_changes_raises_on_410(requests_mock):
     with pytest.raises(SyncTokenExpiredError):
         adapter.list_changes("stale-delta-link")
 
-def test_create_posts_contact_and_returns_id(requests_mock):
-    requests_mock.post(f"{BASE}/me/contacts", json={"id": "AAMk-new"})
+def test_create_posts_contact_and_returns_id_and_etag(requests_mock):
+    requests_mock.post(f"{BASE}/me/contacts", json={"id": "AAMk-new", "@odata.etag": 'W/"etag-created"'})
     adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
 
-    provider_id = adapter.create(CanonicalContact(display_name="New", emails=[Email(value="n@e.com")]))
+    result = adapter.create(CanonicalContact(display_name="New", emails=[Email(value="n@e.com")]))
 
-    assert provider_id == "AAMk-new"
+    assert result == ("AAMk-new", 'W/"etag-created"')
+
+
+def test_list_changes_populates_changed_contact_etag(requests_mock):
+    requests_mock.get(
+        f"{BASE}/me/contactFolders/contacts/contacts/delta",
+        json={
+            "value": [
+                {
+                    "id": "AAMk123",
+                    "@odata.etag": 'W/"etag-abc"',
+                    "displayName": "Jane Doe",
+                    "emailAddresses": [{"address": "jane@example.com"}],
+                }
+            ],
+            "@odata.deltaLink": f"{BASE}/x?$deltatoken=y",
+        },
+    )
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].etag == 'W/"etag-abc"'
+
+
+def test_update_requests_representation_and_returns_etag(requests_mock):
+    requests_mock.patch(
+        f"{BASE}/me/contacts/AAMk1", json={"id": "AAMk1", "@odata.etag": 'W/"etag-updated"'}
+    )
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    result = adapter.update("AAMk1", CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+    assert result == 'W/"etag-updated"'
+    assert requests_mock.last_request.headers["Prefer"] == "return=representation"
+
+
+def test_update_returns_none_on_204_no_content(requests_mock):
+    requests_mock.patch(f"{BASE}/me/contacts/AAMk1", status_code=204)
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    result = adapter.update("AAMk1", CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+    assert result is None
 
 def test_delete_treats_404_as_success(requests_mock):
     requests_mock.delete(f"{BASE}/me/contacts/AAMk1", status_code=404)

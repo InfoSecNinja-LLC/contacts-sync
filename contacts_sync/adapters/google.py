@@ -1,3 +1,5 @@
+from typing import Optional
+
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -39,6 +41,7 @@ class GoogleAdapter:
                             provider_id=person["resourceName"],
                             contact=_to_canonical(person),
                             updated_at="",
+                            etag=person.get("etag"),
                         )
                     )
                 page_token = response.get("nextPageToken")
@@ -54,12 +57,12 @@ class GoogleAdapter:
 
         return ChangeSet(changes=changes, next_sync_token=next_sync_token)
 
-    def create(self, contact: CanonicalContact) -> str:
+    def create(self, contact: CanonicalContact) -> tuple[str, Optional[str]]:
         body = _to_person(contact)
         response = self._service.people().createContact(body=body).execute(num_retries=5)
-        return response["resourceName"]
+        return response["resourceName"], response.get("etag")
 
-    def update(self, provider_id: str, contact: CanonicalContact) -> None:
+    def update(self, provider_id: str, contact: CanonicalContact) -> Optional[str]:
         body = _to_person(contact)
         etag = contact.extra.get("google_etag")
         if etag:
@@ -70,7 +73,7 @@ class GoogleAdapter:
             # a brand-new contact has no prior etag to send.
             body["etag"] = etag
         try:
-            self._service.people().updateContact(
+            response = self._service.people().updateContact(
                 resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
             ).execute(num_retries=5)
         except HttpError as exc:
@@ -86,9 +89,10 @@ class GoogleAdapter:
                 .execute(num_retries=5)
             )
             body["etag"] = fresh_person["etag"]
-            self._service.people().updateContact(
+            response = self._service.people().updateContact(
                 resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
             ).execute(num_retries=5)
+        return response.get("etag") if isinstance(response, dict) else None
 
     def delete(self, provider_id: str) -> None:
         self._service.people().deleteContact(resourceName=provider_id).execute(num_retries=5)

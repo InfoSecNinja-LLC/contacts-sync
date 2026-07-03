@@ -77,6 +77,7 @@ class SyncEngine:
                             contact_id = match.contact_id
                             if not dry_run:
                                 self._db.link_provider(contact_id, name, change.provider_id)
+                                self._db.set_link_etag(name, change.provider_id, change.etag)
                         elif match.status == "ambiguous":
                             pending_review += 1
                             if not dry_run:
@@ -93,13 +94,27 @@ class SyncEngine:
                             if not dry_run:
                                 contact_id = self._db.create_contact(change.contact)
                                 self._db.link_provider(contact_id, name, change.provider_id)
+                                self._db.set_link_etag(name, change.provider_id, change.etag)
                                 dirty_ids.add(contact_id)
                             continue
+
+                    # Echo suppression: if this change carries the same etag we
+                    # last observed/wrote for the resource, it's either our own
+                    # write coming back or an unchanged resource. Skip it
+                    # entirely so it never becomes dirty and never gets re-pushed.
+                    stored_etag = self._db.get_link_etag(name, change.provider_id)
+                    if change.etag is not None and stored_etag is not None and change.etag == stored_etag:
+                        logger.debug(
+                            f"SKIP-ECHO provider={name} provider_id={change.provider_id} etag={change.etag}"
+                        )
+                        continue
 
                     existing_contact = self._db.get_contact(contact_id)
                     self._merge_into(existing_contact, change, name, dry_run)
                     dirty_ids.add(existing_contact.id)
                     updated += 1
+                    if not dry_run:
+                        self._db.set_link_etag(name, change.provider_id, change.etag)
 
                 if not dry_run:
                     self._db.set_sync_token(name, change_set.next_sync_token)
@@ -182,11 +197,17 @@ class SyncEngine:
                         # This is catch-up and always runs, even for contacts
                         # that weren't touched this run, so a partially-failed
                         # previous sync can still be completed.
-                        provider_id = adapter.create(contact)
+                        provider_id, etag = adapter.create(contact)
                         self._db.link_provider(contact.id, name, provider_id)
+                        # Record the etag our write produced so the echo of this
+                        # create on the next pull is recognized and suppressed.
+                        self._db.set_link_etag(name, provider_id, etag)
                     elif contact.id in dirty_ids:
                         # Already linked AND changed this run: propagate.
-                        adapter.update(links[name], contact)
+                        etag = adapter.update(links[name], contact)
+                        # Record the etag our write produced so the echo of this
+                        # update on the next pull is recognized and suppressed.
+                        self._db.set_link_etag(name, links[name], etag)
                     # else: already linked and unchanged this run -> skip; no
                     # network call needed.
                 except Exception as exc:

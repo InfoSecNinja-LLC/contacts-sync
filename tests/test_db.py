@@ -53,6 +53,37 @@ def test_provider_link_roundtrip(db):
     assert db.get_links_for_contact(contact_id) == {"google": "people/123"}
 
 
+def test_link_etag_roundtrip(db):
+    contact_id = db.create_contact(CanonicalContact(display_name="Jane Doe"))
+    db.link_provider(contact_id, "google", "people/123")
+
+    # A freshly-linked provider has no etag until one is set.
+    assert db.get_link_etag("google", "people/123") is None
+
+    db.set_link_etag("google", "people/123", "etag-1")
+    assert db.get_link_etag("google", "people/123") == "etag-1"
+
+    db.set_link_etag("google", "people/123", "etag-2")
+    assert db.get_link_etag("google", "people/123") == "etag-2"
+
+
+def test_get_link_etag_returns_none_for_unknown_link(db):
+    assert db.get_link_etag("google", "people/does-not-exist") is None
+
+
+def test_migrate_is_idempotent_and_etag_column_exists(tmp_path):
+    database = Database(str(tmp_path / "idempotent.db"))
+    database.migrate()
+    # Calling migrate() again must not error even though the etag column and
+    # all tables already exist.
+    database.migrate()
+
+    contact_id = database.create_contact(CanonicalContact(display_name="Jane"))
+    database.link_provider(contact_id, "google", "people/1")
+    database.set_link_etag("google", "people/1", "etag-x")
+    assert database.get_link_etag("google", "people/1") == "etag-x"
+
+
 def test_sync_token_roundtrip(db):
     assert db.get_sync_token("google") is None
     db.set_sync_token("google", "token-abc")
