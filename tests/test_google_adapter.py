@@ -219,6 +219,67 @@ def test_create_does_not_include_etag_in_body(mocker):
     assert "etag" not in kwargs["body"]
 
 
+def test_update_refetches_etag_and_retries_on_etag_conflict(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.updateContact.return_value.execute.side_effect = [
+        _fake_http_error(
+            400, message=b"Request person.etag is different than the current person.etag."
+        ),
+        {},
+    ]
+    people.get.return_value.execute.return_value = {
+        "resourceName": "people/123",
+        "etag": "fresh-etag-xyz",
+        "names": [{"displayName": "Jane Doe", "givenName": "Jane", "familyName": "Doe"}],
+    }
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    contact = CanonicalContact(
+        display_name="Jane Doe",
+        emails=[Email(value="jane@example.com")],
+        extra={"google_etag": "stale-etag"},
+    )
+    adapter.update("people/123", contact)
+
+    people.get.assert_called_once()
+    _, get_kwargs = people.get.call_args
+    assert get_kwargs["resourceName"] == "people/123"
+    assert get_kwargs["personFields"] == PERSON_FIELDS
+
+    assert people.updateContact.call_count == 2
+    second_call_kwargs = people.updateContact.call_args_list[1].kwargs
+    assert second_call_kwargs["body"]["etag"] == "fresh-etag-xyz"
+
+
+def test_update_does_not_refetch_on_non_etag_400(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.updateContact.return_value.execute.side_effect = _fake_http_error(
+        400, message=b"Some other bad request error"
+    )
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    contact = CanonicalContact(
+        display_name="Jane Doe",
+        emails=[Email(value="jane@example.com")],
+        extra={"google_etag": "stale-etag"},
+    )
+    with pytest.raises(HttpError):
+        adapter.update("people/123", contact)
+
+    people.get.assert_not_called()
+    assert people.updateContact.call_count == 1
+
+
 def test_delete_calls_delete_contact_with_provider_id(mocker):
     people = mocker.Mock()
     people.deleteContact.return_value.execute.return_value = {}

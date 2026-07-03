@@ -69,12 +69,34 @@ class GoogleAdapter:
             # "Request must set person.etag ...". create() must NOT send this:
             # a brand-new contact has no prior etag to send.
             body["etag"] = etag
-        self._service.people().updateContact(
-            resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
-        ).execute(num_retries=5)
+        try:
+            self._service.people().updateContact(
+                resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
+            ).execute(num_retries=5)
+        except HttpError as exc:
+            if not _is_etag_conflict(exc):
+                raise
+            # The cached etag is stale. Google's own error message says to
+            # "Clear local cache and get the latest person." Re-fetch the
+            # current person to obtain a fresh top-level etag, substitute it
+            # into the request body, and retry the update exactly once.
+            fresh_person = (
+                self._service.people()
+                .get(resourceName=provider_id, personFields=PERSON_FIELDS)
+                .execute(num_retries=5)
+            )
+            body["etag"] = fresh_person["etag"]
+            self._service.people().updateContact(
+                resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
+            ).execute(num_retries=5)
 
     def delete(self, provider_id: str) -> None:
         self._service.people().deleteContact(resourceName=provider_id).execute(num_retries=5)
+
+
+def _is_etag_conflict(exc: HttpError) -> bool:
+    status = exc.resp.status if hasattr(exc, "resp") else None
+    return status == 400 and "etag" in str(exc).lower()
 
 
 def _to_canonical(person: dict) -> CanonicalContact:
