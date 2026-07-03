@@ -352,6 +352,12 @@ def _to_canonical(vcard) -> CanonicalContact:
 def _to_vcard(contact: CanonicalContact):
     vcard = vobject.vCard()
     vcard.add("fn").value = contact.display_name
+    # Apple's CardDAV server rejects any vCard PUT without a UID property
+    # ("null vcard or UID missing from vcard"). Derive it from the contact's
+    # stable local canonical id so repeated pushes/updates of the SAME
+    # contact keep the same UID rather than getting a new random one each
+    # time (which would confuse iCloud's own change tracking).
+    vcard.add("uid").value = f"contacts-sync-{contact.id}"
     name = vcard.add("n")
     name.value = vobject.vcard.Name(family=contact.family_name or "", given=contact.given_name or "")
     for email in contact.emails:

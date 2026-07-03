@@ -108,6 +108,29 @@ def test_create_propagates_412_when_resource_already_exists(requests_mock):
         adapter.create(CanonicalContact(id=1, display_name="New", emails=[Email(value="n@e.com")]))
 
 
+def test_to_vcard_includes_uid_derived_from_contact_id():
+    """Apple's CardDAV server rejects any vCard PUT without a UID property
+    ("null vcard or UID missing from vcard"), confirmed live. The UID must be
+    derived from the contact's local canonical id so it's stable across
+    repeated pushes of the same contact.
+    """
+    contact = CanonicalContact(id=42, display_name="Jane Doe")
+
+    vcard = _to_vcard(contact)
+
+    assert hasattr(vcard, "uid")
+    assert "42" in vcard.uid.value
+
+
+def test_to_vcard_uid_is_stable_across_calls():
+    contact = CanonicalContact(id=42, display_name="Jane Doe")
+
+    vcard1 = _to_vcard(contact)
+    vcard2 = _to_vcard(contact)
+
+    assert vcard1.uid.value == vcard2.uid.value
+
+
 def test_to_canonical_reads_back_structured_name_round_trip():
     contact = CanonicalContact(given_name="John", family_name="Smith", display_name="John Smith")
 
