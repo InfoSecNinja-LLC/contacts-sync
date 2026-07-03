@@ -11,8 +11,8 @@ def test_run_icloud_auth_saves_credentials(mocker):
 
     icloud_auth.run_icloud_auth()
 
-    save_mock.assert_any_call("contacts-sync", "icloud", "apple_id", "me@icloud.com")
-    save_mock.assert_any_call("contacts-sync", "icloud", "app_password", "app-specific-pass")
+    save_mock.assert_any_call("Private", "icloud", "apple_id", "me@icloud.com")
+    save_mock.assert_any_call("Private", "icloud", "app_password", "app-specific-pass")
 
 
 def test_get_credentials_returns_stored_values(mocker):

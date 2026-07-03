@@ -6,14 +6,14 @@ from contacts_sync.sync_engine import SyncEngine
 from contacts_sync.auth import google_auth, microsoft_auth, icloud_auth
 from contacts_sync.adapters.google import GoogleAdapter
 from contacts_sync.adapters.microsoft import MicrosoftAdapter
-from contacts_sync.adapters.icloud import ICloudAdapter
+from contacts_sync.adapters.icloud import ICloudAdapter, discover_addressbook_path
 
 
 def _configure_logging():
     logger = logging.getLogger("contacts_sync.sync")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
-        handler = logging.FileHandler("sync.log")
+        handler = logging.FileHandler("sync.log", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         logger.addHandler(handler)
 
@@ -23,7 +23,6 @@ auth_app = typer.Typer()
 app.add_typer(auth_app, name="auth")
 
 DB_PATH = "contacts.db"
-ICLOUD_ADDRESSBOOK_PATH = "/carddavhome/addressbooks/card/"
 
 
 @app.callback()
@@ -58,10 +57,11 @@ def _build_adapters(microsoft_client_id: str) -> dict:
     google_creds = google_auth.get_credentials()
     apple_id, app_password = icloud_auth.get_credentials()
     ms_token_provider = microsoft_auth.get_token_provider(microsoft_client_id)
+    addressbook_path = discover_addressbook_path(apple_id, app_password)
     return {
         "google": GoogleAdapter(google_creds),
         "microsoft": MicrosoftAdapter(ms_token_provider),
-        "icloud": ICloudAdapter(apple_id, app_password, ICLOUD_ADDRESSBOOK_PATH),
+        "icloud": ICloudAdapter(apple_id, app_password, addressbook_path),
     }
 
 

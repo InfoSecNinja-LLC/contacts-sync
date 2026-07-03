@@ -16,9 +16,9 @@ def test_run_installed_app_auth_saves_credentials(mocker):
 
     google_auth.run_installed_app_auth("client_secrets.json")
 
-    save_mock.assert_any_call("contacts-sync", "google", "refresh_token", "rt-1")
-    save_mock.assert_any_call("contacts-sync", "google", "client_id", "cid-1")
-    save_mock.assert_any_call("contacts-sync", "google", "client_secret", "secret-1")
+    save_mock.assert_any_call("Private", "google", "refresh_token", "rt-1")
+    save_mock.assert_any_call("Private", "google", "client_id", "cid-1")
+    save_mock.assert_any_call("Private", "google", "client_secret", "secret-1")
 
 
 def test_get_credentials_raises_when_not_authed(mocker):

@@ -16,7 +16,7 @@ from google.auth.transport.requests import Request
 from contacts_sync.auth.onepassword import op_read, op_set_field, OnePasswordError
 
 SCOPES = ["https://www.googleapis.com/auth/contacts"]
-VAULT = "contacts-sync"
+VAULT = "Private"
 
 
 def run_installed_app_auth(client_secrets_path: str) -> None:

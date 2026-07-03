@@ -11,7 +11,7 @@ def test_run_device_code_auth_saves_token_cache(mocker):
     microsoft_auth.run_device_code_auth("client-id-1")
 
     fake_app.acquire_token_by_device_flow.assert_called_once()
-    save_mock.assert_called_once_with("contacts-sync", "microsoft", "token_cache", "cache-blob")
+    save_mock.assert_called_once_with("Private", "microsoft", "token_cache", "cache-blob")
 
 
 def test_get_token_provider_uses_cached_account(mocker):

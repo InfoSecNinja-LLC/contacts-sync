@@ -1,6 +1,13 @@
+import defusedxml.ElementTree as ET
 import pytest
 import vobject
-from contacts_sync.adapters.icloud import ICloudAdapter, _parse_multistatus, _to_canonical, _to_vcard
+from contacts_sync.adapters.icloud import (
+    ICloudAdapter,
+    _parse_multistatus,
+    _to_canonical,
+    _to_vcard,
+    discover_addressbook_path,
+)
 from contacts_sync.adapters.base import SyncTokenExpiredError
 from contacts_sync.models import CanonicalContact, Email
 
@@ -39,6 +46,24 @@ def test_list_changes_parses_vcard_from_multistatus(requests_mock):
     assert change_set.changes[0].contact.display_name == "Jane Doe"
     assert change_set.changes[0].contact.emails[0].value == "jane@example.com"
     assert change_set.next_sync_token == "https://contacts.icloud.com/sync/2"
+
+
+def test_list_changes_sends_sync_collection_in_dav_namespace(requests_mock):
+    """Regression test: per RFC 6578, sync-collection is a WebDAV REPORT type
+    defined in the DAV: namespace, not CardDAV. The root element of the
+    REPORT request body must be <D:sync-collection>, not <C:sync-collection>.
+    Sending <C:sync-collection> against a real iCloud account produces a 400
+    Bad Request ("Didn't understand the report") because Apple's CardDAV
+    server does not recognize sync-collection under the CardDAV namespace.
+    """
+    requests_mock.register_uri("REPORT", f"{BASE}{ADDRESSBOOK}", text=SYNC_RESPONSE, status_code=207)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+
+    adapter.list_changes(None)
+
+    sent_body = requests_mock.request_history[0].text
+    root = ET.fromstring(sent_body)
+    assert root.tag == "{DAV:}sync-collection", f"root element should be in DAV: namespace, got {root.tag}"
 
 
 def test_list_changes_raises_on_invalid_sync_token(requests_mock):
@@ -210,3 +235,566 @@ END:VCARD
     names = {c.contact.display_name for c in change_set.changes}
     assert names == {"Jane Doe", "Bob Jones", "Carol White"}
     assert change_set.next_sync_token == "https://contacts.icloud.com/sync/3"
+
+
+def test_list_changes_skips_collection_self_entry_with_no_address_data(requests_mock):
+    """Real-world bug: a real iCloud sync-collection REPORT response includes
+    an extra <D:response> entry representing the addressbook COLLECTION
+    resource itself (per RFC 6578), alongside entries for each member vCard.
+    This entry's propstat/prop only has <D:getetag>, no <C:address-data>, so
+    _parse_multistatus's address_data comes back as "" for it. list_changes
+    must skip this entry rather than calling vobject.readOne(""), which
+    raises StopIteration (whose str() is confusingly empty, producing the
+    "ERROR [icloud]: " symptom seen live with nothing after the colon).
+    """
+    response_with_collection_entry = """<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/carddavhome/addressbooks/card</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"collection-etag"</D:getetag>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/carddavhome/addressbooks/card/jane.vcf</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"etag-1"</D:getetag>
+        <C:address-data>BEGIN:VCARD
+VERSION:3.0
+FN:Jane Doe
+EMAIL:jane@example.com
+END:VCARD
+</C:address-data>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:sync-token>https://contacts.icloud.com/sync/2</D:sync-token>
+</D:multistatus>"""
+    requests_mock.register_uri("REPORT", f"{BASE}{ADDRESSBOOK}", text=response_with_collection_entry, status_code=207)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+
+    change_set = adapter.list_changes(None)
+
+    assert len(change_set.changes) == 1
+    assert change_set.changes[0].contact.display_name == "Jane Doe"
+
+
+def _is_depth(depth):
+    def matcher(request):
+        return request.headers.get("Depth") == depth
+
+    return matcher
+
+
+def test_discover_addressbook_path_follows_principal_then_home_set(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:addressbook-home-set>
+          <D:href>/1234567890/carddavhome/</D:href>
+        </C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/1234567890/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/carddavhome/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/1234567890/carddavhome/card/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    # discover_addressbook_path always returns a fully-resolved absolute URL,
+    # even when the underlying hrefs were relative paths, so ICloudAdapter
+    # never has to guess which form it received. It also now performs a third
+    # discovery step (Depth:1 enumeration of the home-set's children) since
+    # the home-set itself is a container, not a queryable addressbook.
+    assert path == f"{BASE}/1234567890/carddavhome/card/"
+
+
+def _register_principal_and_home_set(requests_mock, home_set_href="/877060579/carddavhome/"):
+    """Shared helper for tests focused on the third discovery step: registers
+    the first two PROPFIND hops (principal, then home-set) with fixed,
+    uninteresting responses so each test can focus on mocking the Depth:1
+    home-set enumeration response.
+    """
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/877060579/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/877060579/principal/",
+        text=f"""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/877060579/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:addressbook-home-set>
+          <D:href>{home_set_href}</D:href>
+        </C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+
+def test_discover_addressbook_path_finds_addressbook_collection_within_home_set(requests_mock):
+    """Real-world bug: the addressbook-home-set collection is a CONTAINER,
+    not itself a queryable addressbook. Using it directly for sync-collection
+    REPORT requests produces a 400 Bad Request from Apple's server. A third
+    discovery step (Depth:1 PROPFIND on the home-set, enumerating children and
+    checking each child's DAV:resourcetype for a carddav:addressbook marker)
+    is required to find the actual addressbook collection URL.
+    """
+    _register_principal_and_home_set(requests_mock)
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/877060579/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/877060579/carddavhome/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/877060579/carddavhome/card/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    assert path == f"{BASE}/877060579/carddavhome/card/"
+
+
+def test_discover_addressbook_path_sends_depth_1_for_home_set_enumeration(requests_mock):
+    _register_principal_and_home_set(requests_mock)
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/877060579/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/877060579/carddavhome/card/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    discover_addressbook_path("me@icloud.com", "app-pass")
+
+    depth_1_requests = [
+        r for r in requests_mock.request_history
+        if r.url == f"{BASE}/877060579/carddavhome/" and r.headers.get("Depth") == "1"
+    ]
+    assert len(depth_1_requests) == 1
+
+
+def test_discover_addressbook_path_raises_when_no_addressbook_collection_found(requests_mock):
+    """If Depth:1 enumeration returns children but none of them has a
+    resourcetype containing carddav:addressbook, discovery must fail loudly
+    rather than silently returning the (non-queryable) home-set URL again.
+    """
+    _register_principal_and_home_set(requests_mock)
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/877060579/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/877060579/carddavhome/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    with pytest.raises(RuntimeError, match="addressbook"):
+        discover_addressbook_path("me@icloud.com", "app-pass")
+
+
+def test_discover_addressbook_path_prefers_card_suffixed_collection_when_multiple_match(requests_mock):
+    """Some accounts have multiple addressbook-typed collections within the
+    home-set (e.g. a "Shared" addressbook alongside the default one). When
+    more than one child's resourcetype matches carddav:addressbook, prefer
+    whichever href ends in "/card/", matching Apple's known default-collection
+    convention, rather than arbitrarily picking whichever appears first.
+    """
+    _register_principal_and_home_set(requests_mock)
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/877060579/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/877060579/carddavhome/shared/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/877060579/carddavhome/card/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    assert path == f"{BASE}/877060579/carddavhome/card/"
+
+
+def test_discover_addressbook_path_takes_first_addressbook_match_when_none_end_in_card(requests_mock):
+    """When multiple addressbook-typed collections are found but none of them
+    has an href ending in "/card/", fall back to just taking the first match
+    rather than raising or guessing further.
+    """
+    _register_principal_and_home_set(requests_mock)
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/877060579/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/877060579/carddavhome/default/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/877060579/carddavhome/shared/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    assert path == f"{BASE}/877060579/carddavhome/default/"
+
+
+def test_discover_addressbook_path_raises_on_enumeration_request_failure(requests_mock):
+    """The third discovery step's network call must also be wrapped as a
+    RuntimeError on failure, following the established pattern for the other
+    two discovery steps.
+    """
+    _register_principal_and_home_set(requests_mock)
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/877060579/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        status_code=401,
+        text="Unauthorized",
+    )
+
+    with pytest.raises(RuntimeError):
+        discover_addressbook_path("me@icloud.com", "app-pass")
+
+
+def test_discover_addressbook_path_resolves_absolute_url_href(requests_mock):
+    """Regression test: Apple's CardDAV server returns the addressbook-home-set
+    href as a FULL absolute URL pointing at a per-account sharded hostname
+    (e.g. p119-contacts.icloud.com), not a path relative to contacts.icloud.com.
+    discover_addressbook_path must resolve this correctly via urljoin rather
+    than naively concatenating it onto BASE_URL (which previously produced a
+    mangled URL like "https://contacts.icloud.comhttps://p119-...").
+    """
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:addressbook-home-set>
+          <D:href>https://p119-contacts.icloud.com:443/877060579/carddavhome/</D:href>
+        </C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", "https://p119-contacts.icloud.com:443/877060579/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/877060579/carddavhome/card/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    assert path == "https://p119-contacts.icloud.com:443/877060579/carddavhome/card/"
+
+
+def test_discover_addressbook_path_resolves_absolute_url_principal_href(requests_mock):
+    """Defensive test for the same class of bug on the FIRST hop: if the
+    current-user-principal href is itself returned as a full absolute URL
+    (rather than a relative path), the second PROPFIND request must be sent
+    to that resolved URL, not a mangled BASE_URL + href concatenation.
+    """
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>https://p119-contacts.icloud.com:443/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", "https://p119-contacts.icloud.com:443/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:addressbook-home-set>
+          <D:href>/1234567890/carddavhome/</D:href>
+        </C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", "https://p119-contacts.icloud.com:443/1234567890/carddavhome/",
+        additional_matcher=_is_depth("1"),
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/carddavhome/card/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/><C:addressbook/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    path = discover_addressbook_path("me@icloud.com", "app-pass")
+
+    # The second-hop href was relative, but it must resolve against the
+    # sharded principal URL from the first hop, not against BASE_URL. The
+    # third-hop (Depth:1 enumeration) href is also relative and must resolve
+    # against the home-set URL from the second hop.
+    assert path == "https://p119-contacts.icloud.com:443/1234567890/carddavhome/card/"
+
+
+def test_icloud_adapter_uses_full_absolute_url_addressbook_path_as_is(requests_mock):
+    """Regression test: when ICloudAdapter is constructed with a FULL absolute
+    URL as addressbook_path (as discover_addressbook_path now returns for
+    per-account sharded servers), it must use that URL as-is rather than
+    re-prepending BASE_URL (which would produce a mangled URL like
+    "https://contacts.icloud.comhttps://p119-...").
+    """
+    sharded_addressbook = "https://p119-contacts.icloud.com:443/877060579/carddavhome/"
+    requests_mock.register_uri("REPORT", sharded_addressbook, text=SYNC_RESPONSE, status_code=207)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", sharded_addressbook)
+
+    change_set = adapter.list_changes(None)
+
+    assert requests_mock.last_request.url == sharded_addressbook
+    assert len(change_set.changes) == 1
+
+
+def test_discover_addressbook_path_raises_when_principal_missing(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop/>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    with pytest.raises(RuntimeError, match="principal"):
+        discover_addressbook_path("me@icloud.com", "app-pass")
+
+
+def test_discover_addressbook_path_raises_when_home_set_missing(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/1234567890/principal/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/1234567890/principal/",
+        text="""<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/1234567890/principal/</D:href>
+    <D:propstat>
+      <D:prop/>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>""",
+        status_code=207,
+    )
+
+    with pytest.raises(RuntimeError, match="addressbook"):
+        discover_addressbook_path("me@icloud.com", "app-pass")
+
+
+def test_discover_addressbook_path_raises_on_auth_failure(requests_mock):
+    requests_mock.register_uri(
+        "PROPFIND", f"{BASE}/",
+        status_code=401,
+        text="Unauthorized",
+    )
+
+    with pytest.raises(RuntimeError):
+        discover_addressbook_path("me@icloud.com", "bad-pass")
