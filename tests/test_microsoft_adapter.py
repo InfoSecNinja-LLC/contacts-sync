@@ -1,5 +1,5 @@
 import pytest
-from contacts_sync.adapters.microsoft import MicrosoftAdapter
+from contacts_sync.adapters.microsoft import MicrosoftAdapter, _to_graph
 from contacts_sync.adapters.base import SyncTokenExpiredError
 from contacts_sync.models import CanonicalContact, Email, Phone
 
@@ -67,3 +67,39 @@ def test_delete_treats_404_as_success(requests_mock):
     requests_mock.delete(f"{BASE}/me/contacts/AAMk1", status_code=404)
     adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
     adapter.delete("AAMk1")  # should not raise
+
+
+def test_to_graph_truncates_business_phones_to_two_entries():
+    """Microsoft Graph enforces a hard maximum of 2 entries for businessPhones,
+    confirmed live: "The multi value property businessPhones has 4 entries,
+    that exceeds the max allowed value of 2." A contact with more non-mobile
+    phones than that must be truncated, not sent as-is.
+    """
+    contact = CanonicalContact(
+        display_name="Many Phones",
+        phones=[
+            Phone(value="1111111111"),
+            Phone(value="2222222222"),
+            Phone(value="3333333333"),
+            Phone(value="4444444444"),
+        ],
+    )
+
+    body = _to_graph(contact)
+
+    assert len(body["businessPhones"]) == 2
+    assert body["businessPhones"] == ["1111111111", "2222222222"]
+
+
+def test_create_sends_truncated_business_phones(requests_mock):
+    requests_mock.post(f"{BASE}/me/contacts", json={"id": "AAMk-new"})
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    contact = CanonicalContact(
+        display_name="Many Phones",
+        phones=[Phone(value=str(n) * 10) for n in range(1, 5)],
+    )
+    adapter.create(contact)
+
+    sent_body = requests_mock.last_request.json()
+    assert len(sent_body["businessPhones"]) == 2

@@ -110,7 +110,13 @@ def _to_graph(contact: CanonicalContact) -> dict:
     }
     if contact.notes:
         body["personalNotes"] = contact.notes
-    business_phones = [p.value for p in contact.phones if p.type != "mobile"]
+    # Graph enforces a hard maximum of 2 entries for businessPhones (documented
+    # limit; confirmed live with "...exceeds the max allowed value of 2").
+    # contacts-sync's canonical model doesn't distinguish home/business phones,
+    # so overflow numbers are simply dropped for this provider rather than
+    # invented a routing scheme Graph's schema doesn't support either way
+    # (homePhones is also capped at 2).
+    business_phones = [p.value for p in contact.phones if p.type != "mobile"][:2]
     mobile = next((p.value for p in contact.phones if p.type == "mobile"), None)
     if business_phones:
         body["businessPhones"] = business_phones
