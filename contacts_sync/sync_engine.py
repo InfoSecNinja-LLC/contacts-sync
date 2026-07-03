@@ -35,6 +35,10 @@ class SyncEngine:
     def run(self, dry_run: bool = False) -> SyncResult:
         errors = {}
         created = updated = deleted = pending_review = 0
+        # Contact ids that were created or modified during THIS run's pull
+        # phase. Only these need their changes pushed back out to already-linked
+        # providers; untouched contacts are skipped to avoid redundant writes.
+        dirty_ids: set[int] = set()
 
         for name, adapter in self._adapters.items():
             try:
@@ -89,10 +93,12 @@ class SyncEngine:
                             if not dry_run:
                                 contact_id = self._db.create_contact(change.contact)
                                 self._db.link_provider(contact_id, name, change.provider_id)
+                                dirty_ids.add(contact_id)
                             continue
 
                     existing_contact = self._db.get_contact(contact_id)
                     self._merge_into(existing_contact, change, name, dry_run)
+                    dirty_ids.add(existing_contact.id)
                     updated += 1
 
                 if not dry_run:
@@ -101,7 +107,7 @@ class SyncEngine:
                 errors[name] = str(exc)
 
         if not dry_run:
-            self._push_to_providers(errors)
+            self._push_to_providers(errors, dirty_ids)
 
         return SyncResult(errors, created, updated, deleted, pending_review)
 
@@ -164,7 +170,7 @@ class SyncEngine:
         if not dry_run:
             self._db.update_contact(existing_contact)
 
-    def _push_to_providers(self, errors):
+    def _push_to_providers(self, errors, dirty_ids):
         for contact in self._db.list_contacts():
             links = self._db.get_links_for_contact(contact.id)
             for name, adapter in self._adapters.items():
@@ -172,9 +178,16 @@ class SyncEngine:
                     continue
                 try:
                     if name not in links:
+                        # Not yet linked to this provider: create it there.
+                        # This is catch-up and always runs, even for contacts
+                        # that weren't touched this run, so a partially-failed
+                        # previous sync can still be completed.
                         provider_id = adapter.create(contact)
                         self._db.link_provider(contact.id, name, provider_id)
-                    else:
+                    elif contact.id in dirty_ids:
+                        # Already linked AND changed this run: propagate.
                         adapter.update(links[name], contact)
+                    # else: already linked and unchanged this run -> skip; no
+                    # network call needed.
                 except Exception as exc:
                     errors[name] = str(exc)

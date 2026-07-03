@@ -263,6 +263,60 @@ def test_dry_run_does_not_write_anything(db):
     assert db.list_contacts() == []
 
 
+def test_unchanged_already_linked_contact_is_not_repushed(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    google = FakeAdapter("google")
+    microsoft = FakeAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result = engine.run()
+
+    assert google.updated == []
+    assert microsoft.updated == []
+    assert result.updated == 0
+
+
+def test_dirty_contact_is_pushed_to_all_providers(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com"), Email(value="jane.new@e.com")],
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    microsoft = FakeAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    engine.run()
+
+    updated_provider_ids = {pid for pid, _ in google.updated} | {pid for pid, _ in microsoft.updated}
+    assert updated_provider_ids == {"g-1", "ms-1"}
+
+
+def test_unlinked_provider_gets_create_even_if_not_dirty(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+
+    google = FakeAdapter("google")
+    microsoft = FakeAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    engine.run()
+
+    assert len(microsoft.created) == 1
+    assert microsoft.created[0].display_name == "Jane"
+    assert google.updated == []
+
+
 def test_provider_error_is_isolated_and_reported(db):
     class ExplodingAdapter(FakeAdapter):
         def list_changes(self, since_token):
