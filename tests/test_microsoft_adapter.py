@@ -91,6 +91,25 @@ def test_to_graph_truncates_business_phones_to_two_entries():
     assert body["businessPhones"] == ["1111111111", "2222222222"]
 
 
+def test_to_graph_truncates_email_addresses_to_three_entries():
+    """Graph/Outlook contacts support at most 3 email addresses; a contact with
+    more must be truncated, not sent as-is (same failure class as businessPhones).
+    """
+    contact = CanonicalContact(
+        display_name="Many Emails",
+        emails=[Email(value=f"e{i}@example.com") for i in range(6)],
+    )
+
+    body = _to_graph(contact)
+
+    assert len(body["emailAddresses"]) == 3
+    assert [e["address"] for e in body["emailAddresses"]] == [
+        "e0@example.com",
+        "e1@example.com",
+        "e2@example.com",
+    ]
+
+
 def test_create_sends_truncated_business_phones(requests_mock):
     requests_mock.post(f"{BASE}/me/contacts", json={"id": "AAMk-new"})
     adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")

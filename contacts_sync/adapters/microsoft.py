@@ -99,11 +99,15 @@ def _to_canonical(item: dict) -> CanonicalContact:
 
 
 def _to_graph(contact: CanonicalContact) -> dict:
+    # Graph/Outlook contacts support at most 3 email addresses (Email1/Email2/
+    # Email3); sending more is rejected the same way businessPhones overflow is.
+    # Overflow emails are dropped for this provider (canonical store keeps them all).
+    emails = [{"address": e.value, "name": contact.display_name} for e in contact.emails][:3]
     body = {
         "displayName": contact.display_name,
         "givenName": contact.given_name,
         "surname": contact.family_name,
-        "emailAddresses": [{"address": e.value, "name": contact.display_name} for e in contact.emails],
+        "emailAddresses": emails,
         "companyName": contact.organization,
         "jobTitle": contact.title,
         "categories": contact.groups,

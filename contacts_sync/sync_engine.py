@@ -153,7 +153,9 @@ class SyncEngine:
         # record. Without this, a contact created once and never re-merged
         # would keep whatever (possibly now-stale) `extra` it got at creation
         # time, and a later push could send a stale etag to the provider.
-        existing_contact.extra.update(incoming.extra)
+        # Only merge truthy values so a partial/malformed response that omits a
+        # key (e.g. a missing etag surfacing as None) can't clobber a good value.
+        existing_contact.extra.update({k: v for k, v in incoming.extra.items() if v})
 
         logger.info(
             f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
