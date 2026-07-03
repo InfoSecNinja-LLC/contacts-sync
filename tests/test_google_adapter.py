@@ -6,6 +6,7 @@ from contacts_sync.adapters.base import SyncTokenExpiredError
 
 FAKE_PERSON = {
     "resourceName": "people/123",
+    "etag": "%EgUBAj0CBy4=",
     "emailAddresses": [{"value": "jane@example.com"}],
     "phoneNumbers": [{"value": "+15551234567"}],
     "names": [{"displayName": "Jane Doe", "givenName": "Jane", "familyName": "Doe"}],
@@ -42,6 +43,19 @@ def test_list_changes_maps_person_to_canonical(mocker):
     assert change.contact.display_name == "Jane Doe"
     assert change.contact.emails[0].value == "jane@example.com"
     assert change_set.next_sync_token == "sync-2"
+
+
+def test_list_changes_captures_etag_into_extra(mocker):
+    service = _fake_service(
+        mocker,
+        {"connections": [FAKE_PERSON], "nextSyncToken": "sync-2"},
+    )
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.extra["google_etag"] == "%EgUBAj0CBy4="
 
 
 def test_list_changes_flags_deleted_contacts(mocker):
@@ -141,6 +155,68 @@ def test_update_does_not_clobber_addresses_or_organizations(mocker):
     body = kwargs["body"]
     assert "addresses" not in body
     assert "organizations" not in body
+
+
+def test_update_includes_etag_in_body_when_contact_has_one(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.updateContact.return_value.execute.return_value = {}
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    contact = CanonicalContact(
+        display_name="Jane Doe",
+        emails=[Email(value="jane@example.com")],
+        extra={"google_etag": "%EgUBAj0CBy4="},
+    )
+    adapter.update("people/123", contact)
+
+    people.updateContact.assert_called_once()
+    _, kwargs = people.updateContact.call_args
+    body = kwargs["body"]
+    assert body["etag"] == "%EgUBAj0CBy4="
+
+
+def test_update_omits_etag_when_contact_has_none(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.updateContact.return_value.execute.return_value = {}
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    contact = CanonicalContact(display_name="Jane Doe", emails=[Email(value="jane@example.com")])
+    adapter.update("people/123", contact)
+
+    _, kwargs = people.updateContact.call_args
+    body = kwargs["body"]
+    assert "etag" not in body
+
+
+def test_create_does_not_include_etag_in_body(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.createContact.return_value.execute.return_value = {"resourceName": "people/789"}
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+
+    # Even if a stray etag were present in extra on a "new" contact object,
+    # create() must never send it - Google's createContact doesn't want one.
+    contact = CanonicalContact(
+        display_name="New Person", emails=[Email(value="n@e.com")], extra={"google_etag": "stale-etag"}
+    )
+    adapter.create(contact)
+
+    _, kwargs = people.createContact.call_args
+    assert "etag" not in kwargs["body"]
 
 
 def test_delete_calls_delete_contact_with_provider_id(mocker):

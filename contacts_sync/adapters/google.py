@@ -61,6 +61,14 @@ class GoogleAdapter:
 
     def update(self, provider_id: str, contact: CanonicalContact) -> None:
         body = _to_person(contact)
+        etag = contact.extra.get("google_etag")
+        if etag:
+            # The People API requires person.etag (or
+            # person.metadata.sources.etag) to be set on every updateContact
+            # request for optimistic concurrency - omitting it produces a 400
+            # "Request must set person.etag ...". create() must NOT send this:
+            # a brand-new contact has no prior etag to send.
+            body["etag"] = etag
         self._service.people().updateContact(
             resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
         ).execute(num_retries=5)
@@ -81,6 +89,7 @@ def _to_canonical(person: dict) -> CanonicalContact:
         emails=emails,
         phones=phones,
         notes=notes,
+        extra={"google_etag": person.get("etag")},
     )
 
 

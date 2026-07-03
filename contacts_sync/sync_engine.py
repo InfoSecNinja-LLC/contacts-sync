@@ -147,6 +147,14 @@ class SyncEngine:
         ]
 
         existing_contact.field_meta = meta
+
+        # Propagate provider-specific passthrough data (e.g. a freshly-pulled
+        # Google etag) from the incoming change into the existing canonical
+        # record. Without this, a contact created once and never re-merged
+        # would keep whatever (possibly now-stale) `extra` it got at creation
+        # time, and a later push could send a stale etag to the provider.
+        existing_contact.extra.update(incoming.extra)
+
         logger.info(
             f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
             f"fields=display_name,given_name,family_name,notes,emails,phones"

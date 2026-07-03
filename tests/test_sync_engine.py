@@ -109,6 +109,30 @@ def test_matched_contact_merges_structured_name_from_incoming(db):
     assert result.updated == 1
 
 
+def test_merge_into_propagates_extra_from_incoming_change(db):
+    existing_id = db.create_contact(
+        CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")], extra={"google_etag": "stale"})
+    )
+    db.link_provider(existing_id, "google", "g-1")
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com")],
+            extra={"google_etag": "fresh"},
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    engine = SyncEngine(db, {"google": google})
+
+    engine.run()
+
+    updated_contact = db.get_contact(existing_id)
+    assert updated_contact.extra["google_etag"] == "fresh"
+
+
 def test_deleted_contact_is_removed_locally(db):
     existing_id = db.create_contact(CanonicalContact(display_name="Jane"))
     db.link_provider(existing_id, "google", "g-1")
