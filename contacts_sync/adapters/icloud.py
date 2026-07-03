@@ -52,6 +52,16 @@ ADDRESSBOOK_HOME_PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8" ?>
   </D:prop>
 </D:propfind>"""
 
+ADDRESSBOOK_COLLECTION_PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:resourcetype/>
+    <D:displayname/>
+  </D:prop>
+</D:propfind>"""
+
+CARDDAV_ADDRESSBOOK_TAG = "{urn:ietf:params:xml:ns:carddav}addressbook"
+
 
 class ICloudAdapter:
     name = "icloud"
@@ -183,11 +193,20 @@ def _extract_propstat_href(xml_text: str, property_path: str) -> str:
 
 
 def discover_addressbook_path(apple_id: str, app_password: str) -> str:
-    """Discover this account's real CardDAV addressbook path via RFC 6764 principal lookup.
+    """Discover this account's real, queryable CardDAV addressbook collection URL.
 
     Replaces guessing a hardcoded path (which only works for some accounts) with
-    the standard two-step discovery: current-user-principal, then addressbook-home-set.
-    Raises RuntimeError with a clear message if either step fails or the expected
+    the standard three-step discovery: current-user-principal, then
+    addressbook-home-set, then enumerating the home-set's children to find the
+    actual addressbook collection within it.
+
+    The addressbook-home-set is a CONTAINER resource, not itself a queryable
+    addressbook — issuing sync-collection REPORT requests directly against it
+    produces a 400 Bad Request from Apple's server. Per RFC 6352, a third
+    PROPFIND (Depth: 1) on the home-set is required to enumerate its children
+    and identify which one is actually addressbook-typed.
+
+    Raises RuntimeError with a clear message if any step fails or the expected
     property is missing from the response.
     """
     auth = (apple_id, app_password)
@@ -247,7 +266,62 @@ def discover_addressbook_path(apple_id: str, app_password: str) -> str:
     # p119-contacts.icloud.com), not a path relative to contacts.icloud.com.
     # Resolve via urljoin so the caller always receives a usable absolute URL
     # regardless of which form the server chose.
-    return urljoin(principal_url, home_href)
+    home_set_url = urljoin(principal_url, home_href)
+
+    return _discover_addressbook_collection(home_set_url, auth)
+
+
+def _discover_addressbook_collection(home_set_url: str, auth) -> str:
+    """Enumerate the addressbook-home-set's immediate children (Depth: 1) and
+    return the URL of whichever child is actually addressbook-typed.
+
+    The home-set is a container that may hold one or more addressbook
+    collections (e.g. a default collection plus a "Shared" addressbook on
+    some accounts) — it is not itself queryable via sync-collection REPORT.
+    A child is identified as an addressbook by its DAV:resourcetype property
+    containing a {urn:ietf:params:xml:ns:carddav}addressbook element. If more
+    than one child matches, prefer one whose href ends in "/card/" (Apple's
+    known default-collection convention); otherwise take the first match.
+    """
+    try:
+        response = request_with_retry(
+            "PROPFIND",
+            home_set_url,
+            data=ADDRESSBOOK_COLLECTION_PROPFIND_BODY,
+            auth=auth,
+            headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(
+            "Failed to enumerate iCloud CardDAV addressbook home's collections — "
+            "check that the app-specific password is valid and hasn't been revoked."
+        ) from exc
+
+    root = ET.fromstring(response.text)
+    matches = []
+    for child_response in root.findall("D:response", NS):
+        propstat = child_response.find("D:propstat", NS)
+        if propstat is None:
+            continue
+        resourcetype = propstat.find("D:prop/D:resourcetype", NS)
+        if resourcetype is None:
+            continue
+        if resourcetype.find(CARDDAV_ADDRESSBOOK_TAG) is None:
+            continue
+        href = child_response.findtext("D:href", default="", namespaces=NS)
+        if href:
+            matches.append(href)
+
+    if not matches:
+        raise RuntimeError(
+            "Could not discover iCloud CardDAV addressbook collection — none of "
+            "the addressbook-home-set's children have a resourcetype matching "
+            "carddav:addressbook."
+        )
+
+    preferred = next((href for href in matches if href.endswith("/card/")), matches[0])
+    return urljoin(home_set_url, preferred)
 
 
 def _to_canonical(vcard) -> CanonicalContact:
