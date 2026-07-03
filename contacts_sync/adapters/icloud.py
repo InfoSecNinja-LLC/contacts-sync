@@ -29,14 +29,14 @@ BASE_URL = "https://contacts.icloud.com"
 NS = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:carddav"}
 
 SYNC_COLLECTION_BODY = """<?xml version="1.0" encoding="utf-8" ?>
-<C:sync-collection xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+<D:sync-collection xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
   <D:sync-token>{sync_token}</D:sync-token>
   <D:sync-level>1</D:sync-level>
   <D:prop>
     <D:getetag/>
     <C:address-data/>
   </D:prop>
-</C:sync-collection>"""
+</D:sync-collection>"""
 
 PRINCIPAL_PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:">

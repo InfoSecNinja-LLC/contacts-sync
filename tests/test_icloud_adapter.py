@@ -1,3 +1,4 @@
+import defusedxml.ElementTree as ET
 import pytest
 import vobject
 from contacts_sync.adapters.icloud import (
@@ -45,6 +46,24 @@ def test_list_changes_parses_vcard_from_multistatus(requests_mock):
     assert change_set.changes[0].contact.display_name == "Jane Doe"
     assert change_set.changes[0].contact.emails[0].value == "jane@example.com"
     assert change_set.next_sync_token == "https://contacts.icloud.com/sync/2"
+
+
+def test_list_changes_sends_sync_collection_in_dav_namespace(requests_mock):
+    """Regression test: per RFC 6578, sync-collection is a WebDAV REPORT type
+    defined in the DAV: namespace, not CardDAV. The root element of the
+    REPORT request body must be <D:sync-collection>, not <C:sync-collection>.
+    Sending <C:sync-collection> against a real iCloud account produces a 400
+    Bad Request ("Didn't understand the report") because Apple's CardDAV
+    server does not recognize sync-collection under the CardDAV namespace.
+    """
+    requests_mock.register_uri("REPORT", f"{BASE}{ADDRESSBOOK}", text=SYNC_RESPONSE, status_code=207)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+
+    adapter.list_changes(None)
+
+    sent_body = requests_mock.request_history[0].text
+    root = ET.fromstring(sent_body)
+    assert root.tag == "{DAV:}sync-collection", f"root element should be in DAV: namespace, got {root.tag}"
 
 
 def test_list_changes_raises_on_invalid_sync_token(requests_mock):
