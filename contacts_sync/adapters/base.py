@@ -8,6 +8,13 @@ class SyncTokenExpiredError(Exception):
     pass
 
 
+class ProviderResourceGoneError(Exception):
+    """Raised by an adapter when a provider resource we hold a link to no longer
+    exists (HTTP 404 on update). Signals the sync engine to drop the stale link
+    rather than error the whole provider for the rest of the run."""
+    pass
+
+
 @dataclass
 class ChangedContact:
     provider_id: str

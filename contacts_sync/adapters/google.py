@@ -3,7 +3,12 @@ from typing import Optional
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from contacts_sync.adapters.base import ChangedContact, ChangeSet, SyncTokenExpiredError
+from contacts_sync.adapters.base import (
+    ChangedContact,
+    ChangeSet,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 from contacts_sync.models import CanonicalContact, Email, Phone
 
 PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies"
@@ -77,6 +82,8 @@ class GoogleAdapter:
                 resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
             ).execute(num_retries=5)
         except HttpError as exc:
+            if _is_not_found(exc):
+                raise ProviderResourceGoneError(str(exc)) from exc
             if not _is_etag_conflict(exc):
                 raise
             # The cached etag is stale. Google's own error message says to
@@ -101,6 +108,11 @@ class GoogleAdapter:
 def _is_etag_conflict(exc: HttpError) -> bool:
     status = exc.resp.status if hasattr(exc, "resp") else None
     return status == 400 and "etag" in str(exc).lower()
+
+
+def _is_not_found(exc: HttpError) -> bool:
+    status = exc.resp.status if hasattr(exc, "resp") else None
+    return status == 404
 
 
 def _to_canonical(person: dict) -> CanonicalContact:

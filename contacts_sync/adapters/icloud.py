@@ -22,7 +22,12 @@ import defusedxml.ElementTree as ET
 import requests
 import vobject
 
-from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
+from contacts_sync.adapters.base import (
+    ChangeSet,
+    ChangedContact,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 from contacts_sync.http_retry import request_with_retry
 from contacts_sync.models import CanonicalContact, Email, Phone
 
@@ -146,6 +151,10 @@ class ICloudAdapter:
             auth=self._auth,
             headers={"Content-Type": "text/vcard; charset=utf-8"},
         )
+        if response.status_code == 404:
+            raise ProviderResourceGoneError(
+                f"iCloud resource {provider_id} not found (404) - link is stale"
+            )
         response.raise_for_status()
         return response.headers.get("ETag")
 

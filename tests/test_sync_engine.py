@@ -1,7 +1,12 @@
 import pytest
 from contacts_sync.db import Database
 from contacts_sync.sync_engine import SyncEngine
-from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
+from contacts_sync.adapters.base import (
+    ChangeSet,
+    ChangedContact,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 from contacts_sync.models import CanonicalContact, Email
 
 @pytest.fixture
@@ -479,3 +484,63 @@ def test_provider_error_is_isolated_and_reported(db):
 
     assert "google" in result.provider_errors
     assert "boom" in result.provider_errors["google"]
+
+
+def test_stale_link_404_on_push_drops_link_and_does_not_error_provider(db):
+    # Contact linked to both providers; microsoft's update raises "gone" (404).
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    # An incoming change dirties the contact so it gets pushed this run.
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]),
+        updated_at="2026-01-02T00:00:00Z",
+        etag="g-etag-new",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+
+    class GoneAdapter(FakeAdapter):
+        def update(self, provider_id, contact):
+            raise ProviderResourceGoneError(f"{provider_id} not found (404)")
+
+    microsoft = GoneAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result = engine.run()
+
+    # microsoft's stale link is dropped, google's remains, provider not errored
+    assert db.get_link("microsoft", "ms-1") is None
+    assert db.get_link("google", "g-1") == existing_id
+    assert "microsoft" not in result.provider_errors
+
+
+def test_stale_link_drop_does_not_block_other_contacts_on_same_provider(db):
+    # Two contacts both linked+dirty on microsoft; first 404s, second must still push.
+    id_a = db.create_contact(CanonicalContact(display_name="A", emails=[Email(value="a@e.com")]))
+    id_b = db.create_contact(CanonicalContact(display_name="B", emails=[Email(value="b@e.com")]))
+    db.link_provider(id_a, "microsoft", "ms-a")
+    db.link_provider(id_b, "microsoft", "ms-b")
+
+    changes = [
+        ChangedContact(provider_id="ms-a", contact=CanonicalContact(display_name="A", emails=[Email(value="a@e.com")]), updated_at="2026-01-02T00:00:00Z", etag="e-a"),
+        ChangedContact(provider_id="ms-b", contact=CanonicalContact(display_name="B", emails=[Email(value="b@e.com")]), updated_at="2026-01-02T00:00:00Z", etag="e-b"),
+    ]
+
+    class GoneForA(FakeAdapter):
+        def update(self, provider_id, contact):
+            if provider_id == "ms-a":
+                raise ProviderResourceGoneError("ms-a not found (404)")
+            self.updated.append((provider_id, contact))
+            return self._update_etag
+
+    microsoft = GoneForA("microsoft", changes=changes)
+    engine = SyncEngine(db, {"microsoft": microsoft})
+
+    engine.run()
+
+    # ms-a dropped, ms-b still updated (not blocked by the earlier stale link)
+    assert db.get_link("microsoft", "ms-a") is None
+    assert ("ms-b", microsoft.updated[0][1].display_name) or microsoft.updated  # ms-b was updated
+    assert any(pid == "ms-b" for pid, _ in microsoft.updated)

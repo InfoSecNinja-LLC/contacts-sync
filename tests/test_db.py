@@ -53,6 +53,18 @@ def test_provider_link_roundtrip(db):
     assert db.get_links_for_contact(contact_id) == {"google": "people/123"}
 
 
+def test_unlink_provider_removes_only_that_link(db):
+    contact_id = db.create_contact(CanonicalContact(display_name="Jane Doe"))
+    db.link_provider(contact_id, "google", "people/123")
+    db.link_provider(contact_id, "microsoft", "ms-1")
+
+    db.unlink_provider("microsoft", "ms-1")
+
+    assert db.get_link("microsoft", "ms-1") is None
+    assert db.get_link("google", "people/123") == contact_id
+    assert db.get_contact(contact_id) is not None
+
+
 def test_link_etag_roundtrip(db):
     contact_id = db.create_contact(CanonicalContact(display_name="Jane Doe"))
     db.link_provider(contact_id, "google", "people/123")

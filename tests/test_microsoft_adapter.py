@@ -165,3 +165,11 @@ def test_create_sends_truncated_business_phones(requests_mock):
 
     sent_body = requests_mock.last_request.json()
     assert len(sent_body["businessPhones"]) == 2
+
+
+def test_update_raises_resource_gone_on_404(requests_mock):
+    from contacts_sync.adapters.base import ProviderResourceGoneError
+    requests_mock.patch(f"{BASE}/me/contacts/AAMkGONE", status_code=404)
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+    with pytest.raises(ProviderResourceGoneError):
+        adapter.update("AAMkGONE", CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))

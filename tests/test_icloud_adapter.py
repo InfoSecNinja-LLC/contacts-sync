@@ -840,3 +840,12 @@ def test_discover_addressbook_path_raises_on_auth_failure(requests_mock):
 
     with pytest.raises(RuntimeError):
         discover_addressbook_path("me@icloud.com", "bad-pass")
+
+
+def test_update_raises_resource_gone_on_404(requests_mock):
+    from contacts_sync.adapters.base import ProviderResourceGoneError
+    href = f"{BASE}{ADDRESSBOOK}gone.vcf"
+    requests_mock.put(href, status_code=404)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+    with pytest.raises(ProviderResourceGoneError):
+        adapter.update(href, CanonicalContact(id=5, display_name="Jane", emails=[Email(value="j@e.com")]))

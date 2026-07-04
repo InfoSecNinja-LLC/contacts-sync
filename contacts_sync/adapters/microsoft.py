@@ -9,7 +9,12 @@ calls it to get a fresh bearer token per request.
 
 from typing import Optional
 
-from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
+from contacts_sync.adapters.base import (
+    ChangeSet,
+    ChangedContact,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 from contacts_sync.http_retry import request_with_retry
 from contacts_sync.models import CanonicalContact, Email, Phone
 
@@ -81,6 +86,10 @@ class MicrosoftAdapter:
         response = request_with_retry(
             "PATCH", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=headers, json=_to_graph(contact)
         )
+        if response.status_code == 404:
+            raise ProviderResourceGoneError(
+                f"Microsoft contact {provider_id} not found (404) - link is stale"
+            )
         response.raise_for_status()
         # Defensively handle an empty/204 body despite the Prefer header - the
         # next pull will backfill the etag in that case.

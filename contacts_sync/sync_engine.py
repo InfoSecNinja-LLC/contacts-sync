@@ -5,7 +5,7 @@ from contacts_sync.db import Database
 from contacts_sync.matcher import match_contact, normalize_email, normalize_phone
 from contacts_sync.merger import merge_single_value, merge_multi_value
 from contacts_sync.models import Email, Phone
-from contacts_sync.adapters.base import SyncTokenExpiredError
+from contacts_sync.adapters.base import ProviderResourceGoneError, SyncTokenExpiredError
 
 logger = logging.getLogger("contacts_sync.sync")
 
@@ -210,5 +210,17 @@ class SyncEngine:
                         self._db.set_link_etag(name, links[name], etag)
                     # else: already linked and unchanged this run -> skip; no
                     # network call needed.
+                except ProviderResourceGoneError as exc:
+                    # The resource we hold a link to no longer exists on the
+                    # provider (deduped/deleted server-side). Drop just this
+                    # stale link and keep going - do NOT mark the whole provider
+                    # errored, so other contacts still sync this run. A future
+                    # run's catch-up will re-create the contact there only if it
+                    # has no remaining link to this provider.
+                    self._db.unlink_provider(name, links[name])
+                    logger.info(
+                        f"STALE-LINK dropped contact_id={contact.id} provider={name} "
+                        f"provider_id={links[name]} ({exc})"
+                    )
                 except Exception as exc:
                     errors[name] = str(exc)

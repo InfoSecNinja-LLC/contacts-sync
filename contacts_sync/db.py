@@ -165,6 +165,18 @@ class Database:
             ).fetchone()
             return row["etag"] if row else None
 
+    def unlink_provider(self, provider: str, provider_id: str) -> None:
+        """Remove a single provider link (e.g. after a 404 proves it is stale).
+
+        Only deletes the link row; the canonical contact and its other provider
+        links are left intact.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM provider_links WHERE provider = ? AND provider_id = ?",
+                (provider, provider_id),
+            )
+
     def get_link(self, provider: str, provider_id: str) -> Optional[int]:
         with self._connect() as conn:
             row = conn.execute(
