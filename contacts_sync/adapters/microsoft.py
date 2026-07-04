@@ -7,7 +7,14 @@ callable (see `contacts_sync.auth.microsoft_auth.get_token_provider`) and
 calls it to get a fresh bearer token per request.
 """
 
-from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
+from typing import Optional
+
+from contacts_sync.adapters.base import (
+    ChangeSet,
+    ChangedContact,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 from contacts_sync.http_retry import request_with_retry
 from contacts_sync.models import CanonicalContact, Email, Phone
 
@@ -53,6 +60,7 @@ class MicrosoftAdapter:
                         provider_id=item["id"],
                         contact=_to_canonical(item),
                         updated_at=item.get("lastModifiedDateTime", ""),
+                        etag=item.get("@odata.etag"),
                     )
                 )
             url = body.get("@odata.nextLink")
@@ -61,18 +69,33 @@ class MicrosoftAdapter:
 
         return ChangeSet(changes=changes, next_sync_token=next_token)
 
-    def create(self, contact: CanonicalContact) -> str:
+    def create(self, contact: CanonicalContact) -> tuple[str, Optional[str]]:
         response = request_with_retry(
             "POST", f"{GRAPH_BASE}/me/contacts", headers=self._headers(), json=_to_graph(contact)
         )
         response.raise_for_status()
-        return response.json()["id"]
+        body = response.json()
+        return body["id"], body.get("@odata.etag")
 
-    def update(self, provider_id: str, contact: CanonicalContact) -> None:
+    def update(self, provider_id: str, contact: CanonicalContact) -> Optional[str]:
+        # Graph's PATCH returns 204 No Content by default; asking for
+        # `return=representation` makes it echo back the updated entity
+        # (including its new @odata.etag) so we can record it and suppress the
+        # inevitable echo on the next delta pull.
+        headers = {**self._headers(), "Prefer": "return=representation"}
         response = request_with_retry(
-            "PATCH", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers(), json=_to_graph(contact)
+            "PATCH", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=headers, json=_to_graph(contact)
         )
+        if response.status_code == 404:
+            raise ProviderResourceGoneError(
+                f"Microsoft contact {provider_id} not found (404) - link is stale"
+            )
         response.raise_for_status()
+        # Defensively handle an empty/204 body despite the Prefer header - the
+        # next pull will backfill the etag in that case.
+        if response.status_code == 204 or not response.content:
+            return None
+        return response.json().get("@odata.etag")
 
     def delete(self, provider_id: str) -> None:
         response = request_with_retry("DELETE", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers())

@@ -15,13 +15,19 @@ stdlib XML parsers are vulnerable to XXE and billion-laughs attacks by
 default. Do not change this back to stdlib XML.
 """
 
+from typing import Optional
 from urllib.parse import urljoin
 
 import defusedxml.ElementTree as ET
 import requests
 import vobject
 
-from contacts_sync.adapters.base import ChangeSet, ChangedContact, SyncTokenExpiredError
+from contacts_sync.adapters.base import (
+    ChangeSet,
+    ChangedContact,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 from contacts_sync.http_retry import request_with_retry
 from contacts_sync.models import CanonicalContact, Email, Phone
 
@@ -95,7 +101,7 @@ class ICloudAdapter:
         response.raise_for_status()
 
         changes = []
-        for href, status, _etag, address_data in _parse_multistatus(response.text):
+        for href, status, etag, address_data in _parse_multistatus(response.text):
             if status.startswith("404"):
                 changes.append(ChangedContact(provider_id=href, contact=None, updated_at="", deleted=True))
                 continue
@@ -107,11 +113,13 @@ class ICloudAdapter:
                 # rather than crashing the whole sync run on vobject.readOne("").
                 continue
             vcard = vobject.readOne(address_data)
-            changes.append(ChangedContact(provider_id=href, contact=_to_canonical(vcard), updated_at=""))
+            changes.append(
+                ChangedContact(provider_id=href, contact=_to_canonical(vcard), updated_at="", etag=etag or None)
+            )
 
         return ChangeSet(changes=changes, next_sync_token=_extract_sync_token(response.text))
 
-    def create(self, contact: CanonicalContact) -> str:
+    def create(self, contact: CanonicalContact) -> tuple[str, Optional[str]]:
         vcard = _to_vcard(contact)
         href = f"{self._addressbook_url}{contact.id}.vcf"
         response = request_with_retry(
@@ -132,9 +140,9 @@ class ICloudAdapter:
             },
         )
         response.raise_for_status()
-        return href
+        return href, response.headers.get("ETag")
 
-    def update(self, provider_id: str, contact: CanonicalContact) -> None:
+    def update(self, provider_id: str, contact: CanonicalContact) -> Optional[str]:
         vcard = _to_vcard(contact)
         response = request_with_retry(
             "PUT",
@@ -143,7 +151,12 @@ class ICloudAdapter:
             auth=self._auth,
             headers={"Content-Type": "text/vcard; charset=utf-8"},
         )
+        if response.status_code == 404:
+            raise ProviderResourceGoneError(
+                f"iCloud resource {provider_id} not found (404) - link is stale"
+            )
         response.raise_for_status()
+        return response.headers.get("ETag")
 
     def delete(self, provider_id: str) -> None:
         response = request_with_retry("DELETE", provider_id, auth=self._auth)

@@ -2,10 +2,10 @@ import json
 import logging
 from dataclasses import dataclass
 from contacts_sync.db import Database
-from contacts_sync.matcher import match_contact, normalize_email, normalize_phone
+from contacts_sync.matcher import canonicalize_phone, match_contact, normalize_email, normalize_phone
 from contacts_sync.merger import merge_single_value, merge_multi_value
 from contacts_sync.models import Email, Phone
-from contacts_sync.adapters.base import SyncTokenExpiredError
+from contacts_sync.adapters.base import ProviderResourceGoneError, SyncTokenExpiredError
 
 logger = logging.getLogger("contacts_sync.sync")
 
@@ -77,6 +77,7 @@ class SyncEngine:
                             contact_id = match.contact_id
                             if not dry_run:
                                 self._db.link_provider(contact_id, name, change.provider_id)
+                                self._db.set_link_etag(name, change.provider_id, change.etag)
                         elif match.status == "ambiguous":
                             pending_review += 1
                             if not dry_run:
@@ -93,13 +94,30 @@ class SyncEngine:
                             if not dry_run:
                                 contact_id = self._db.create_contact(change.contact)
                                 self._db.link_provider(contact_id, name, change.provider_id)
+                                self._db.set_link_etag(name, change.provider_id, change.etag)
                                 dirty_ids.add(contact_id)
                             continue
 
+                    # Echo suppression: if this change carries the same etag we
+                    # last observed/wrote for the resource, it's either our own
+                    # write coming back or an unchanged resource. Skip it
+                    # entirely so it never becomes dirty and never gets re-pushed.
+                    stored_etag = self._db.get_link_etag(name, change.provider_id)
+                    if change.etag is not None and stored_etag is not None and change.etag == stored_etag:
+                        logger.debug(
+                            f"SKIP-ECHO provider={name} provider_id={change.provider_id} etag={change.etag}"
+                        )
+                        continue
+
                     existing_contact = self._db.get_contact(contact_id)
-                    self._merge_into(existing_contact, change, name, dry_run)
-                    dirty_ids.add(existing_contact.id)
-                    updated += 1
+                    changed = self._merge_into(existing_contact, change, name, dry_run)
+                    if changed:
+                        dirty_ids.add(existing_contact.id)
+                        updated += 1
+                    # Always record the resource's current etag - even for a
+                    # no-op merge - so its echo is suppressed on the next pull.
+                    if not dry_run:
+                        self._db.set_link_etag(name, change.provider_id, change.etag)
 
                 if not dry_run:
                     self._db.set_sync_token(name, change_set.next_sync_token)
@@ -111,9 +129,29 @@ class SyncEngine:
 
         return SyncResult(errors, created, updated, deleted, pending_review)
 
-    def _merge_into(self, existing_contact, change, provider_name, dry_run):
+    def _merge_into(self, existing_contact, change, provider_name, dry_run) -> bool:
+        """Merge an incoming change into an existing canonical contact.
+
+        Returns True only if the merge actually changed the canonical contact's
+        data. A no-op merge (a pulled "change" whose data we already hold -
+        common when a provider re-reports a resource, e.g. its own dedup bumped
+        an etag) returns False so the caller doesn't mark the contact dirty and
+        needlessly re-push it, which would just provoke another echo.
+        """
         incoming = change.contact
         meta = existing_contact.field_meta
+
+        def _snapshot(c):
+            return (
+                c.display_name,
+                c.notes,
+                c.given_name,
+                c.family_name,
+                sorted(e.value for e in c.emails),
+                sorted(p.value for p in c.phones),
+            )
+
+        before = _snapshot(existing_contact)
 
         new_name, new_name_meta = merge_single_value(
             existing_contact.display_name, meta.get("display_name"), incoming.display_name, change.updated_at,
@@ -145,10 +183,16 @@ class SyncEngine:
                 [e.value for e in existing_contact.emails], [e.value for e in incoming.emails], normalize=normalize_email
             )
         ]
+        # Canonicalize phones to a single stable representation before merging
+        # so the same number in two source formats collapses to one value -
+        # otherwise the push/pull round-trip never converges (the provider
+        # dedupes on write, so we keep re-detecting a "change").
         existing_contact.phones = [
             Phone(value=v)
             for v in merge_multi_value(
-                [p.value for p in existing_contact.phones], [p.value for p in incoming.phones], normalize=normalize_phone
+                [canonicalize_phone(p.value) for p in existing_contact.phones],
+                [canonicalize_phone(p.value) for p in incoming.phones],
+                normalize=normalize_phone,
             )
         ]
 
@@ -163,12 +207,19 @@ class SyncEngine:
         # key (e.g. a missing etag surfacing as None) can't clobber a good value.
         existing_contact.extra.update({k: v for k, v in incoming.extra.items() if v})
 
-        logger.info(
-            f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
-            f"fields=display_name,given_name,family_name,notes,emails,phones"
-        )
+        changed = _snapshot(existing_contact) != before
+        # Always persist (cheap, idempotent) so refreshed passthrough data like
+        # the Google etag in `extra` is saved even when the visible fields
+        # didn't change - but only log/return "changed" for a real data change,
+        # so the caller re-pushes only when there's genuinely something new.
         if not dry_run:
             self._db.update_contact(existing_contact)
+        if changed:
+            logger.info(
+                f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
+                f"fields=display_name,given_name,family_name,notes,emails,phones"
+            )
+        return changed
 
     def _push_to_providers(self, errors, dirty_ids):
         for contact in self._db.list_contacts():
@@ -182,12 +233,30 @@ class SyncEngine:
                         # This is catch-up and always runs, even for contacts
                         # that weren't touched this run, so a partially-failed
                         # previous sync can still be completed.
-                        provider_id = adapter.create(contact)
+                        provider_id, etag = adapter.create(contact)
                         self._db.link_provider(contact.id, name, provider_id)
+                        # Record the etag our write produced so the echo of this
+                        # create on the next pull is recognized and suppressed.
+                        self._db.set_link_etag(name, provider_id, etag)
                     elif contact.id in dirty_ids:
                         # Already linked AND changed this run: propagate.
-                        adapter.update(links[name], contact)
+                        etag = adapter.update(links[name], contact)
+                        # Record the etag our write produced so the echo of this
+                        # update on the next pull is recognized and suppressed.
+                        self._db.set_link_etag(name, links[name], etag)
                     # else: already linked and unchanged this run -> skip; no
                     # network call needed.
+                except ProviderResourceGoneError as exc:
+                    # The resource we hold a link to no longer exists on the
+                    # provider (deduped/deleted server-side). Drop just this
+                    # stale link and keep going - do NOT mark the whole provider
+                    # errored, so other contacts still sync this run. A future
+                    # run's catch-up will re-create the contact there only if it
+                    # has no remaining link to this provider.
+                    self._db.unlink_provider(name, links[name])
+                    logger.info(
+                        f"STALE-LINK dropped contact_id={contact.id} provider={name} "
+                        f"provider_id={links[name]} ({exc})"
+                    )
                 except Exception as exc:
                     errors[name] = str(exc)

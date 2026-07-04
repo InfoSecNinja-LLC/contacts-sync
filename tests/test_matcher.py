@@ -51,3 +51,17 @@ def test_name_only_match_requires_no_contact_info():
     result = match_contact(candidate, existing)
     assert result.status == "matched"
     assert result.contact_id == 1
+
+
+def test_canonicalize_phone_collapses_same_number_formats():
+    from contacts_sync.matcher import canonicalize_phone
+    # The exact real-world case that caused non-converging sync churn:
+    assert canonicalize_phone("(972) 799-4768") == "+19727994768"
+    assert canonicalize_phone("+19727994768") == "+19727994768"
+    # 11-digit with leading 1
+    assert canonicalize_phone("1-972-799-4768") == "+19727994768"
+    # already-plus international kept as-is (digits only)
+    assert canonicalize_phone("+44 7911 123456") == "+447911123456"
+    # short codes / un-E.164-able values kept unchanged (trimmed)
+    assert canonicalize_phone("24273") == "24273"
+    assert canonicalize_phone("  555-CALL  ") == "555-CALL"

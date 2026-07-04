@@ -1,7 +1,14 @@
+from typing import Optional
+
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from contacts_sync.adapters.base import ChangedContact, ChangeSet, SyncTokenExpiredError
+from contacts_sync.adapters.base import (
+    ChangedContact,
+    ChangeSet,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 from contacts_sync.models import CanonicalContact, Email, Phone
 
 PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies"
@@ -39,6 +46,7 @@ class GoogleAdapter:
                             provider_id=person["resourceName"],
                             contact=_to_canonical(person),
                             updated_at="",
+                            etag=person.get("etag"),
                         )
                     )
                 page_token = response.get("nextPageToken")
@@ -54,12 +62,12 @@ class GoogleAdapter:
 
         return ChangeSet(changes=changes, next_sync_token=next_sync_token)
 
-    def create(self, contact: CanonicalContact) -> str:
+    def create(self, contact: CanonicalContact) -> tuple[str, Optional[str]]:
         body = _to_person(contact)
         response = self._service.people().createContact(body=body).execute(num_retries=5)
-        return response["resourceName"]
+        return response["resourceName"], response.get("etag")
 
-    def update(self, provider_id: str, contact: CanonicalContact) -> None:
+    def update(self, provider_id: str, contact: CanonicalContact) -> Optional[str]:
         body = _to_person(contact)
         etag = contact.extra.get("google_etag")
         if etag:
@@ -70,10 +78,12 @@ class GoogleAdapter:
             # a brand-new contact has no prior etag to send.
             body["etag"] = etag
         try:
-            self._service.people().updateContact(
+            response = self._service.people().updateContact(
                 resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
             ).execute(num_retries=5)
         except HttpError as exc:
+            if _is_not_found(exc):
+                raise ProviderResourceGoneError(str(exc)) from exc
             if not _is_etag_conflict(exc):
                 raise
             # The cached etag is stale. Google's own error message says to
@@ -86,9 +96,10 @@ class GoogleAdapter:
                 .execute(num_retries=5)
             )
             body["etag"] = fresh_person["etag"]
-            self._service.people().updateContact(
+            response = self._service.people().updateContact(
                 resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
             ).execute(num_retries=5)
+        return response.get("etag") if isinstance(response, dict) else None
 
     def delete(self, provider_id: str) -> None:
         self._service.people().deleteContact(resourceName=provider_id).execute(num_retries=5)
@@ -97,6 +108,11 @@ class GoogleAdapter:
 def _is_etag_conflict(exc: HttpError) -> bool:
     status = exc.resp.status if hasattr(exc, "resp") else None
     return status == 400 and "etag" in str(exc).lower()
+
+
+def _is_not_found(exc: HttpError) -> bool:
+    status = exc.resp.status if hasattr(exc, "resp") else None
+    return status == 404
 
 
 def _to_canonical(person: dict) -> CanonicalContact:

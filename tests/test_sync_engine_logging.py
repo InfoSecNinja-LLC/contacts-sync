@@ -23,10 +23,10 @@ class FakeAdapter:
         return ChangeSet(changes=self._changes, next_sync_token=self._next_token)
 
     def create(self, contact):
-        return f"{self.name}-new"
+        return f"{self.name}-new", "etag-created"
 
     def update(self, provider_id, contact):
-        pass
+        return "etag-updated"
 
     def delete(self, provider_id):
         pass

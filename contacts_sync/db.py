@@ -81,6 +81,15 @@ class Database:
     def migrate(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            # provider_links.etag was added after the initial schema. Adding it
+            # via ALTER TABLE keeps existing databases usable without a full
+            # rebuild; guard it so re-running migrate() (or running against a
+            # fresh db whose CREATE already had the column) is a no-op.
+            existing_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(provider_links)").fetchall()
+            }
+            if "etag" not in existing_cols:
+                conn.execute("ALTER TABLE provider_links ADD COLUMN etag TEXT")
 
     def create_contact(self, contact: CanonicalContact) -> int:
         with self._connect() as conn:
@@ -139,6 +148,33 @@ class Database:
                 "INSERT OR REPLACE INTO provider_links (contact_id, provider, provider_id) "
                 "VALUES (?, ?, ?)",
                 (contact_id, provider, provider_id),
+            )
+
+    def set_link_etag(self, provider: str, provider_id: str, etag: Optional[str]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE provider_links SET etag = ? WHERE provider = ? AND provider_id = ?",
+                (etag, provider, provider_id),
+            )
+
+    def get_link_etag(self, provider: str, provider_id: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT etag FROM provider_links WHERE provider = ? AND provider_id = ?",
+                (provider, provider_id),
+            ).fetchone()
+            return row["etag"] if row else None
+
+    def unlink_provider(self, provider: str, provider_id: str) -> None:
+        """Remove a single provider link (e.g. after a 404 proves it is stale).
+
+        Only deletes the link row; the canonical contact and its other provider
+        links are left intact.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM provider_links WHERE provider = ? AND provider_id = ?",
+                (provider, provider_id),
             )
 
     def get_link(self, provider: str, provider_id: str) -> Optional[int]:

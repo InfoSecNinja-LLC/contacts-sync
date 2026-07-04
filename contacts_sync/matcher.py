@@ -10,6 +10,34 @@ def normalize_phone(value: str) -> str:
     return "".join(ch for ch in value if ch.isdigit() or ch == "+")
 
 
+def canonicalize_phone(value: str) -> str:
+    """Return a single stable representation of a phone number for storage.
+
+    Providers (notably Google) normalize/dedupe phone numbers on write, so
+    storing the same number in two source formats (e.g. "(972) 799-4768" and
+    "+19727994768") makes the push/pull round-trip never converge - the merge
+    keeps both, we push both, the provider collapses them, and the next pull
+    looks changed again. Canonicalizing to E.164 where possible keeps exactly
+    one representation so the round-trip stabilizes.
+
+    US/NANP-centric (matching the rest of this module's assumptions): a bare
+    10-digit number gets a "+1" prefix, an 11-digit "1..." gets a "+", and a
+    value already starting with "+" is kept (digits only). Anything else
+    (short codes, international numbers written without a "+", extensions) is
+    returned trimmed but otherwise unchanged, since it can't be canonicalized
+    to E.164 without guessing a country.
+    """
+    stripped = value.strip()
+    if stripped.startswith("+"):
+        return "+" + "".join(ch for ch in stripped if ch.isdigit())
+    digits = "".join(ch for ch in stripped if ch.isdigit())
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    return stripped
+
+
 def _phone_match_key(value: str) -> str:
     """Comparison key for phone matching, tolerant of a leading country code.
 

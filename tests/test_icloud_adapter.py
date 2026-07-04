@@ -76,13 +76,31 @@ def test_list_changes_raises_on_invalid_sync_token(requests_mock):
         adapter.list_changes("stale-token")
 
 
-def test_create_puts_vcard(requests_mock):
+def test_create_puts_vcard_and_returns_href_and_etag(requests_mock):
+    requests_mock.put(f"{BASE}{ADDRESSBOOK}1.vcf", status_code=201, headers={"ETag": '"etag-created"'})
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+
+    result = adapter.create(CanonicalContact(id=1, display_name="New", emails=[Email(value="n@e.com")]))
+
+    assert result == (f"{BASE}{ADDRESSBOOK}1.vcf", '"etag-created"')
+
+
+def test_create_returns_none_etag_when_header_absent(requests_mock):
     requests_mock.put(f"{BASE}{ADDRESSBOOK}1.vcf", status_code=201)
     adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
 
-    href = adapter.create(CanonicalContact(id=1, display_name="New", emails=[Email(value="n@e.com")]))
+    result = adapter.create(CanonicalContact(id=1, display_name="New", emails=[Email(value="n@e.com")]))
 
-    assert href == f"{BASE}{ADDRESSBOOK}1.vcf"
+    assert result == (f"{BASE}{ADDRESSBOOK}1.vcf", None)
+
+
+def test_list_changes_populates_changed_contact_etag(requests_mock):
+    requests_mock.register_uri("REPORT", f"{BASE}{ADDRESSBOOK}", text=SYNC_RESPONSE, status_code=207)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].etag == '"etag-1"'
 
 
 def test_delete_treats_404_as_success(requests_mock):
@@ -181,7 +199,7 @@ END:VCARD
 
 def test_update_puts_vcard_to_provider_id_with_contact_data(requests_mock):
     provider_id = f"{BASE}{ADDRESSBOOK}jane.vcf"
-    requests_mock.put(provider_id, status_code=204)
+    requests_mock.put(provider_id, status_code=204, headers={"ETag": '"etag-updated"'})
     adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
 
     contact = CanonicalContact(
@@ -190,8 +208,9 @@ def test_update_puts_vcard_to_provider_id_with_contact_data(requests_mock):
         family_name="Updated",
         emails=[Email(value="jane.updated@example.com")],
     )
-    adapter.update(provider_id, contact)
+    result = adapter.update(provider_id, contact)
 
+    assert result == '"etag-updated"'
     assert requests_mock.last_request.url == provider_id
     assert requests_mock.last_request.method == "PUT"
     body = requests_mock.last_request.text
@@ -821,3 +840,12 @@ def test_discover_addressbook_path_raises_on_auth_failure(requests_mock):
 
     with pytest.raises(RuntimeError):
         discover_addressbook_path("me@icloud.com", "bad-pass")
+
+
+def test_update_raises_resource_gone_on_404(requests_mock):
+    from contacts_sync.adapters.base import ProviderResourceGoneError
+    href = f"{BASE}{ADDRESSBOOK}gone.vcf"
+    requests_mock.put(href, status_code=404)
+    adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
+    with pytest.raises(ProviderResourceGoneError):
+        adapter.update(href, CanonicalContact(id=5, display_name="Jane", emails=[Email(value="j@e.com")]))
