@@ -2,7 +2,7 @@ import json
 import logging
 from dataclasses import dataclass
 from contacts_sync.db import Database
-from contacts_sync.matcher import match_contact, normalize_email, normalize_phone
+from contacts_sync.matcher import canonicalize_phone, match_contact, normalize_email, normalize_phone
 from contacts_sync.merger import merge_single_value, merge_multi_value
 from contacts_sync.models import Email, Phone
 from contacts_sync.adapters.base import ProviderResourceGoneError, SyncTokenExpiredError
@@ -160,10 +160,16 @@ class SyncEngine:
                 [e.value for e in existing_contact.emails], [e.value for e in incoming.emails], normalize=normalize_email
             )
         ]
+        # Canonicalize phones to a single stable representation before merging
+        # so the same number in two source formats collapses to one value -
+        # otherwise the push/pull round-trip never converges (the provider
+        # dedupes on write, so we keep re-detecting a "change").
         existing_contact.phones = [
             Phone(value=v)
             for v in merge_multi_value(
-                [p.value for p in existing_contact.phones], [p.value for p in incoming.phones], normalize=normalize_phone
+                [canonicalize_phone(p.value) for p in existing_contact.phones],
+                [canonicalize_phone(p.value) for p in incoming.phones],
+                normalize=normalize_phone,
             )
         ]
 

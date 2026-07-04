@@ -544,3 +544,28 @@ def test_stale_link_drop_does_not_block_other_contacts_on_same_provider(db):
     assert db.get_link("microsoft", "ms-a") is None
     assert ("ms-b", microsoft.updated[0][1].display_name) or microsoft.updated  # ms-b was updated
     assert any(pid == "ms-b" for pid, _ in microsoft.updated)
+
+
+def test_merge_collapses_same_phone_in_two_formats(db):
+    # Reproduces the live "contact Josh" churn: canonical stores one number in
+    # two formats; the merge must collapse them to a single canonical value so
+    # the push/pull round-trip converges.
+    from contacts_sync.models import Phone
+    existing_id = db.create_contact(
+        CanonicalContact(display_name="Josh", phones=[Phone(value="(972) 799-4768")])
+    )
+    db.link_provider(existing_id, "google", "g-1")
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(display_name="Josh", phones=[Phone(value="+19727994768")]),
+        updated_at="2026-01-02T00:00:00Z",
+        etag="e2",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    engine = SyncEngine(db, {"google": google})
+
+    engine.run()
+
+    updated = db.get_contact(existing_id)
+    assert [p.value for p in updated.phones] == ["+19727994768"]
