@@ -13,6 +13,8 @@ Targets personal Microsoft accounts only (outlook.com/hotmail/live) - the
 out of scope.
 """
 
+import time
+
 import msal
 
 from contacts_sync.auth.onepassword import op_read, op_set_field, OnePasswordError
@@ -54,13 +56,20 @@ def run_device_code_auth(client_id: str) -> None:
 def get_token_provider(client_id: str):
     """Return a zero-argument closure that yields a live Microsoft access token.
 
-    Each call to the returned closure loads the stored token cache, attempts
-    a silent (non-interactive) token acquisition - which transparently
-    refreshes the token if needed - and raises `RuntimeError` if no cached
-    account/token is available (i.e. `run_device_code_auth` hasn't been run).
+    The returned closure caches the acquired access token in-process for its
+    lifetime (minus a safety margin), so a long multi-request sync doesn't
+    re-read the token cache from 1Password on every single Graph request -
+    which previously made long pulls hang whenever the 1Password app auto-locked
+    mid-operation. Only the first call (or one near token expiry) touches
+    1Password / MSAL; it raises `RuntimeError` if no cached account/token is
+    available (i.e. `run_device_code_auth` hasn't been run).
     """
+    state = {"token": None, "expires_at": 0.0}
 
     def get_token() -> str:
+        now = time.time()
+        if state["token"] is not None and now < state["expires_at"] - 120:
+            return state["token"]
         cache = _load_cache()
         app = msal.PublicClientApplication(client_id, authority=AUTHORITY, token_cache=cache)
         accounts = app.get_accounts()
@@ -68,6 +77,8 @@ def get_token_provider(client_id: str):
         if not result:
             raise RuntimeError("No cached Microsoft token. Run `contacts-sync auth microsoft` first.")
         _save_cache(cache)
-        return result["access_token"]
+        state["token"] = result["access_token"]
+        state["expires_at"] = now + result.get("expires_in", 3600)
+        return state["token"]
 
     return get_token

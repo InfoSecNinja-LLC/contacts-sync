@@ -40,3 +40,25 @@ def test_get_token_provider_raises_when_no_cached_token(mocker):
     import pytest
     with pytest.raises(RuntimeError, match="auth microsoft"):
         get_token()
+
+
+def test_get_token_provider_caches_token_across_calls(mocker):
+    fake_account = {"username": "me@outlook.com"}
+    fake_app = mocker.Mock()
+    fake_app.get_accounts.return_value = [fake_account]
+    fake_app.acquire_token_silent.return_value = {"access_token": "tok-1", "expires_in": 3600}
+    mocker.patch("contacts_sync.auth.microsoft_auth.msal.PublicClientApplication", return_value=fake_app)
+    load_cache = mocker.patch(
+        "contacts_sync.auth.microsoft_auth._load_cache",
+        return_value=mocker.Mock(has_state_changed=False),
+    )
+
+    get_token = microsoft_auth.get_token_provider("client-id-1")
+    t1 = get_token()
+    t2 = get_token()
+    t3 = get_token()
+
+    assert t1 == t2 == t3 == "tok-1"
+    # 1Password (_load_cache) and MSAL acquisition happen ONCE, not per call.
+    assert load_cache.call_count == 1
+    assert fake_app.acquire_token_silent.call_count == 1
