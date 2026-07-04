@@ -110,9 +110,12 @@ class SyncEngine:
                         continue
 
                     existing_contact = self._db.get_contact(contact_id)
-                    self._merge_into(existing_contact, change, name, dry_run)
-                    dirty_ids.add(existing_contact.id)
-                    updated += 1
+                    changed = self._merge_into(existing_contact, change, name, dry_run)
+                    if changed:
+                        dirty_ids.add(existing_contact.id)
+                        updated += 1
+                    # Always record the resource's current etag - even for a
+                    # no-op merge - so its echo is suppressed on the next pull.
                     if not dry_run:
                         self._db.set_link_etag(name, change.provider_id, change.etag)
 
@@ -126,9 +129,29 @@ class SyncEngine:
 
         return SyncResult(errors, created, updated, deleted, pending_review)
 
-    def _merge_into(self, existing_contact, change, provider_name, dry_run):
+    def _merge_into(self, existing_contact, change, provider_name, dry_run) -> bool:
+        """Merge an incoming change into an existing canonical contact.
+
+        Returns True only if the merge actually changed the canonical contact's
+        data. A no-op merge (a pulled "change" whose data we already hold -
+        common when a provider re-reports a resource, e.g. its own dedup bumped
+        an etag) returns False so the caller doesn't mark the contact dirty and
+        needlessly re-push it, which would just provoke another echo.
+        """
         incoming = change.contact
         meta = existing_contact.field_meta
+
+        def _snapshot(c):
+            return (
+                c.display_name,
+                c.notes,
+                c.given_name,
+                c.family_name,
+                sorted(e.value for e in c.emails),
+                sorted(p.value for p in c.phones),
+            )
+
+        before = _snapshot(existing_contact)
 
         new_name, new_name_meta = merge_single_value(
             existing_contact.display_name, meta.get("display_name"), incoming.display_name, change.updated_at,
@@ -184,12 +207,19 @@ class SyncEngine:
         # key (e.g. a missing etag surfacing as None) can't clobber a good value.
         existing_contact.extra.update({k: v for k, v in incoming.extra.items() if v})
 
-        logger.info(
-            f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
-            f"fields=display_name,given_name,family_name,notes,emails,phones"
-        )
+        changed = _snapshot(existing_contact) != before
+        # Always persist (cheap, idempotent) so refreshed passthrough data like
+        # the Google etag in `extra` is saved even when the visible fields
+        # didn't change - but only log/return "changed" for a real data change,
+        # so the caller re-pushes only when there's genuinely something new.
         if not dry_run:
             self._db.update_contact(existing_contact)
+        if changed:
+            logger.info(
+                f"UPDATE contact_id={existing_contact.id} provider={provider_name} "
+                f"fields=display_name,given_name,family_name,notes,emails,phones"
+            )
+        return changed
 
     def _push_to_providers(self, errors, dirty_ids):
         for contact in self._db.list_contacts():

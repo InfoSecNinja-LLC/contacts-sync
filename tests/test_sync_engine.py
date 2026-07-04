@@ -492,10 +492,13 @@ def test_stale_link_404_on_push_drops_link_and_does_not_error_provider(db):
     db.link_provider(existing_id, "google", "g-1")
     db.link_provider(existing_id, "microsoft", "ms-1")
 
-    # An incoming change dirties the contact so it gets pushed this run.
+    # An incoming change with genuinely new data dirties the contact so it
+    # gets pushed this run.
     incoming = ChangedContact(
         provider_id="g-1",
-        contact=CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]),
+        contact=CanonicalContact(
+            display_name="Jane", emails=[Email(value="jane@e.com"), Email(value="jane.new@e.com")]
+        ),
         updated_at="2026-01-02T00:00:00Z",
         etag="g-etag-new",
     )
@@ -523,9 +526,11 @@ def test_stale_link_drop_does_not_block_other_contacts_on_same_provider(db):
     db.link_provider(id_a, "microsoft", "ms-a")
     db.link_provider(id_b, "microsoft", "ms-b")
 
+    # Incoming changes carry a genuinely new email each so both contacts are
+    # dirty and get pushed this run.
     changes = [
-        ChangedContact(provider_id="ms-a", contact=CanonicalContact(display_name="A", emails=[Email(value="a@e.com")]), updated_at="2026-01-02T00:00:00Z", etag="e-a"),
-        ChangedContact(provider_id="ms-b", contact=CanonicalContact(display_name="B", emails=[Email(value="b@e.com")]), updated_at="2026-01-02T00:00:00Z", etag="e-b"),
+        ChangedContact(provider_id="ms-a", contact=CanonicalContact(display_name="A", emails=[Email(value="a@e.com"), Email(value="a.new@e.com")]), updated_at="2026-01-02T00:00:00Z", etag="e-a"),
+        ChangedContact(provider_id="ms-b", contact=CanonicalContact(display_name="B", emails=[Email(value="b@e.com"), Email(value="b.new@e.com")]), updated_at="2026-01-02T00:00:00Z", etag="e-b"),
     ]
 
     class GoneForA(FakeAdapter):
@@ -569,3 +574,33 @@ def test_merge_collapses_same_phone_in_two_formats(db):
 
     updated = db.get_contact(existing_id)
     assert [p.value for p in updated.phones] == ["+19727994768"]
+
+
+def test_noop_merge_does_not_repush_but_records_etag(db):
+    # A pulled change whose data we already hold (e.g. a provider re-reporting a
+    # resource with a bumped etag but identical data) must NOT re-push, but must
+    # record the new etag so the next echo suppresses.
+    existing_id = db.create_contact(
+        CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")])
+    )
+    db.link_provider(existing_id, "google", "g-1")
+    db.set_link_etag("google", "g-1", "old-etag")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    # Same data as existing, but a NEW etag (as if the provider's own dedup
+    # bumped the resource version without changing user-visible fields).
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]),
+        updated_at="2026-01-02T00:00:00Z",
+        etag="new-etag",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    microsoft = FakeAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result = engine.run()
+
+    assert result.updated == 0                         # no real change
+    assert microsoft.updated == []                     # not re-pushed anywhere
+    assert db.get_link_etag("google", "g-1") == "new-etag"  # etag still refreshed
