@@ -125,7 +125,7 @@ def _populate_photo(contact: CanonicalContact, contact_id: str, headers: dict) -
             return
         response.raise_for_status()
         contact.photo_data = response.content
-        contact.photo_content_type = response.headers.get("Content-Type")
+        contact.photo_content_type = response.headers.get("Content-Type", "").split(";")[0].strip() or None
     except requests.exceptions.RequestException:
         pass
 

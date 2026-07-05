@@ -198,6 +198,26 @@ def test_list_changes_fetches_photo_for_changed_contact(requests_mock):
     assert change_set.changes[0].contact.photo_content_type == "image/jpeg"
 
 
+def test_list_changes_strips_parameters_from_content_type_header(requests_mock):
+    requests_mock.get(
+        f"{BASE}/me/contactFolders/contacts/contacts/delta",
+        json={
+            "value": [{"id": "AAMk123", "displayName": "Jane Doe"}],
+            "@odata.deltaLink": f"{BASE}/x?$deltatoken=y",
+        },
+    )
+    requests_mock.get(
+        f"{BASE}/me/contacts/AAMk123/photo/$value",
+        content=b"fake-photo-bytes",
+        headers={"Content-Type": "image/jpeg; charset=binary"},
+    )
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.photo_content_type == "image/jpeg"
+
+
 def test_list_changes_treats_404_photo_as_no_photo(requests_mock):
     requests_mock.get(
         f"{BASE}/me/contactFolders/contacts/contacts/delta",
