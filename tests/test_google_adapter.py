@@ -348,3 +348,95 @@ def test_delete_calls_delete_contact_with_provider_id(mocker):
     adapter.delete("people/123")
 
     people.deleteContact.assert_called_once_with(resourceName="people/123")
+
+
+def test_list_changes_fetches_photo_bytes_for_non_default_photo(mocker):
+    person_with_photo = {
+        **FAKE_PERSON,
+        "photos": [{"url": "https://photo.example/jane.jpg", "default": False}],
+    }
+    service = _fake_service(mocker, {"connections": [person_with_photo], "nextSyncToken": "sync-2"})
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    fake_response = mocker.Mock(content=b"fake-photo-bytes", headers={"Content-Type": "image/jpeg"})
+    fake_response.raise_for_status = mocker.Mock()
+    get_mock = mocker.patch("contacts_sync.adapters.google.requests.get", return_value=fake_response)
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.photo_data == b"fake-photo-bytes"
+    assert change_set.changes[0].contact.photo_content_type == "image/jpeg"
+    get_mock.assert_called_once_with(
+        "https://photo.example/jane.jpg", headers={"Authorization": "Bearer fake-token"}
+    )
+
+
+def test_list_changes_skips_photo_fetch_when_only_default_photo(mocker):
+    person_with_default_photo = {
+        **FAKE_PERSON,
+        "photos": [{"url": "https://photo.example/default.jpg", "default": True}],
+    }
+    service = _fake_service(mocker, {"connections": [person_with_default_photo], "nextSyncToken": "sync-2"})
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    get_mock = mocker.patch("contacts_sync.adapters.google.requests.get")
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.photo_data is None
+    get_mock.assert_not_called()
+
+
+def test_create_pushes_photo_via_update_contact_photo(mocker):
+    import base64
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.createContact.return_value.execute.return_value = {"resourceName": "people/789", "etag": "e1"}
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+
+    contact = CanonicalContact(
+        display_name="New", emails=[Email(value="n@e.com")],
+        photo_data=b"fake-photo-bytes", photo_content_type="image/jpeg",
+    )
+    adapter.create(contact)
+
+    people.updateContactPhoto.assert_called_once_with(
+        resourceName="people/789",
+        body={"photoBytes": base64.b64encode(b"fake-photo-bytes").decode()},
+    )
+
+
+def test_update_does_not_push_photo_when_absent(mocker):
+    from contacts_sync.models import CanonicalContact, Email
+
+    people = mocker.Mock()
+    people.updateContact.return_value.execute.return_value = {}
+    service = mocker.Mock()
+    service.people.return_value = people
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+
+    adapter.update("people/123", CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+    people.updateContactPhoto.assert_not_called()
+
+
+def test_list_changes_strips_parameters_from_content_type_header(mocker):
+    person_with_photo = {
+        **FAKE_PERSON,
+        "photos": [{"url": "https://photo.example/jane.jpg", "default": False}],
+    }
+    service = _fake_service(mocker, {"connections": [person_with_photo], "nextSyncToken": "sync-2"})
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    fake_response = mocker.Mock(content=b"fake-photo-bytes", headers={"Content-Type": "image/jpeg; charset=binary"})
+    fake_response.raise_for_status = mocker.Mock()
+    mocker.patch("contacts_sync.adapters.google.requests.get", return_value=fake_response)
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.photo_content_type == "image/jpeg"
