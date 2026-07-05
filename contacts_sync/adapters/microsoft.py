@@ -9,6 +9,8 @@ calls it to get a fresh bearer token per request.
 
 from typing import Optional
 
+import requests
+
 from contacts_sync.adapters.base import (
     ChangeSet,
     ChangedContact,
@@ -55,10 +57,12 @@ class MicrosoftAdapter:
                 if "@removed" in item:
                     changes.append(ChangedContact(provider_id=item["id"], contact=None, updated_at="", deleted=True))
                     continue
+                contact = _to_canonical(item)
+                _populate_photo(contact, item["id"], self._headers())
                 changes.append(
                     ChangedContact(
                         provider_id=item["id"],
-                        contact=_to_canonical(item),
+                        contact=contact,
                         updated_at=item.get("lastModifiedDateTime", ""),
                         etag=item.get("@odata.etag"),
                     )
@@ -75,7 +79,10 @@ class MicrosoftAdapter:
         )
         response.raise_for_status()
         body = response.json()
-        return body["id"], body.get("@odata.etag")
+        contact_id = body["id"]
+        if contact.photo_data:
+            self._push_photo(contact_id, contact)
+        return contact_id, body.get("@odata.etag")
 
     def update(self, provider_id: str, contact: CanonicalContact) -> Optional[str]:
         # Graph's PATCH returns 204 No Content by default; asking for
@@ -91,16 +98,36 @@ class MicrosoftAdapter:
                 f"Microsoft contact {provider_id} not found (404) - link is stale"
             )
         response.raise_for_status()
+        if contact.photo_data:
+            self._push_photo(provider_id, contact)
         # Defensively handle an empty/204 body despite the Prefer header - the
         # next pull will backfill the etag in that case.
         if response.status_code == 204 or not response.content:
             return None
         return response.json().get("@odata.etag")
 
+    def _push_photo(self, contact_id: str, contact: CanonicalContact) -> None:
+        headers = {**self._headers(), "Content-Type": contact.photo_content_type or "image/jpeg"}
+        request_with_retry(
+            "PUT", f"{GRAPH_BASE}/me/contacts/{contact_id}/photo/$value", headers=headers, data=contact.photo_data
+        )
+
     def delete(self, provider_id: str) -> None:
         response = request_with_retry("DELETE", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers())
         if response.status_code not in (204, 404):
             response.raise_for_status()
+
+
+def _populate_photo(contact: CanonicalContact, contact_id: str, headers: dict) -> None:
+    try:
+        response = request_with_retry("GET", f"{GRAPH_BASE}/me/contacts/{contact_id}/photo/$value", headers=headers)
+        if response.status_code == 404:
+            return
+        response.raise_for_status()
+        contact.photo_data = response.content
+        contact.photo_content_type = response.headers.get("Content-Type")
+    except requests.exceptions.RequestException:
+        pass
 
 
 def _to_canonical(item: dict) -> CanonicalContact:
