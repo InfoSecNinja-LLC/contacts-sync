@@ -38,6 +38,7 @@ class CanonicalContact:
     organization: Optional[str] = None
     title: Optional[str] = None
     groups: list[str] = field(default_factory=list)
-    photo_url: Optional[str] = None
+    photo_data: Optional[bytes] = None
+    photo_content_type: Optional[str] = None
     field_meta: dict = field(default_factory=dict)
     extra: dict = field(default_factory=dict)
