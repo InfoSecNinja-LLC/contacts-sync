@@ -15,7 +15,7 @@ See [`docs/superpowers/specs/2026-07-01-contacts-sync-design.md`](docs/superpowe
 ## Setup
 
 1. `pip install -e ".[dev]"`
-2. Install the [1Password CLI](https://developer.1password.com/docs/cli/). Credentials for all three providers are stored in your default **Private** vault; the 1Password desktop app must be unlocked when `contacts-sync` runs.
+2. Credentials for all three providers are stored in a local `.env` file (gitignored) in the project root, created automatically the first time you run an `auth` command.
 3. **Google**: create OAuth credentials (Desktop app type) in Google Cloud Console for the People API, set the consent screen's publishing status to "In production" (you'll see an "unverified app" warning when you authorize — that's expected for a personal-use app), then run:
    `contacts-sync auth google --client-secrets path/to/client_secrets.json`
 4. **Microsoft**: register a public-client app in Entra ID (Azure Portal), enable "Allow public client flows," support "personal Microsoft accounts," then run:

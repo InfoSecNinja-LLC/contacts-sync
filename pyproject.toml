@@ -10,6 +10,7 @@ dependencies = [
     "requests>=2.32",
     "vobject>=0.9.7",
     "defusedxml>=0.7.1",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

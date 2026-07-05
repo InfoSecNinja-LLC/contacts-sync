@@ -3,8 +3,8 @@
 This module has one responsibility: run the interactive Microsoft device-code
 consent flow once (`run_device_code_auth`) and hand back a zero-argument
 closure that yields a live access token on demand (`get_token_provider`). It
-stores and retrieves an MSAL `SerializableTokenCache` blob via the 1Password
-wrapper in `contacts_sync.auth.onepassword` - it does not duplicate that
+stores and retrieves an MSAL `SerializableTokenCache` blob via the `.env`
+wrapper in `contacts_sync.auth.env_store` - it does not duplicate that
 module's logic, and it has no knowledge of the Microsoft Graph API (contact
 CRUD lives in the Microsoft adapter, not here).
 
@@ -17,32 +17,31 @@ import time
 
 import msal
 
-from contacts_sync.auth.onepassword import op_read, op_set_field, OnePasswordError
+from contacts_sync.auth.env_store import env_read, env_set, EnvStoreError
 
 AUTHORITY = "https://login.microsoftonline.com/consumers"
 SCOPES = ["Contacts.ReadWrite"]
-VAULT = "Private"
 
 
 def _load_cache() -> msal.SerializableTokenCache:
     cache = msal.SerializableTokenCache()
     try:
-        cache.deserialize(op_read(f"op://{VAULT}/microsoft/token_cache"))
-    except OnePasswordError:
+        cache.deserialize(env_read("MICROSOFT_TOKEN_CACHE"))
+    except EnvStoreError:
         pass
     return cache
 
 
 def _save_cache(cache: msal.SerializableTokenCache) -> None:
     if cache.has_state_changed:
-        op_set_field(VAULT, "microsoft", "token_cache", cache.serialize())
+        env_set("MICROSOFT_TOKEN_CACHE", cache.serialize())
 
 
 def run_device_code_auth(client_id: str) -> None:
     """Run the interactive device-code consent flow and save the resulting token cache.
 
     Prints the device-code instructions for the user to complete in a
-    browser, then stores the serialized MSAL token cache in 1Password for
+    browser, then stores the serialized MSAL token cache in `.env` for
     later use by `get_token_provider`.
     """
     cache = _load_cache()
@@ -58,11 +57,10 @@ def get_token_provider(client_id: str):
 
     The returned closure caches the acquired access token in-process for its
     lifetime (minus a safety margin), so a long multi-request sync doesn't
-    re-read the token cache from 1Password on every single Graph request -
-    which previously made long pulls hang whenever the 1Password app auto-locked
-    mid-operation. Only the first call (or one near token expiry) touches
-    1Password / MSAL; it raises `RuntimeError` if no cached account/token is
-    available (i.e. `run_device_code_auth` hasn't been run).
+    re-read the token cache from `.env` on every single Graph request. Only
+    the first call (or one near token expiry) touches `.env` / MSAL; it
+    raises `RuntimeError` if no cached account/token is available (i.e.
+    `run_device_code_auth` hasn't been run).
     """
     state = {"token": None, "expires_at": 0.0}
 
