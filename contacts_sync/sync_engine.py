@@ -149,6 +149,7 @@ class SyncEngine:
                 c.family_name,
                 sorted(e.value for e in c.emails),
                 sorted(p.value for p in c.phones),
+                c.photo_data,
             )
 
         before = _snapshot(existing_contact)
@@ -176,6 +177,17 @@ class SyncEngine:
         )
         existing_contact.family_name = new_family_name
         meta["family_name"] = new_family_name_meta
+
+        new_photo_data, new_photo_meta = merge_single_value(
+            existing_contact.photo_data, meta.get("photo"), incoming.photo_data, change.updated_at,
+        )
+        if new_photo_data != existing_contact.photo_data:
+            # photo_content_type always travels with whichever photo_data value
+            # won the merge - it's metadata about that value, not an
+            # independently-mergeable field.
+            existing_contact.photo_content_type = incoming.photo_content_type
+        existing_contact.photo_data = new_photo_data
+        meta["photo"] = new_photo_meta
 
         existing_contact.emails = [
             Email(value=v)
