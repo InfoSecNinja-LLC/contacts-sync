@@ -68,7 +68,7 @@ def _build_adapters(microsoft_client_id: str) -> dict:
 @app.command()
 def sync(
     dry_run: bool = typer.Option(False, "--dry-run"),
-    microsoft_client_id: str = typer.Option(..., envvar="CONTACTS_SYNC_MS_CLIENT_ID"),
+    microsoft_client_id: str = typer.Option(..., envvar="MICROSOFT_CLIENT_ID"),
 ):
     _configure_logging()
     db = Database(DB_PATH)
@@ -133,7 +133,7 @@ def review():
 
 
 @app.command()
-def doctor(microsoft_client_id: str = typer.Option(None, envvar="CONTACTS_SYNC_MS_CLIENT_ID")):
+def doctor(microsoft_client_id: str = typer.Option(None, envvar="MICROSOFT_CLIENT_ID")):
     for provider, check in (
         ("google", lambda: google_auth.get_credentials()),
         ("icloud", lambda: icloud_auth.get_credentials()),

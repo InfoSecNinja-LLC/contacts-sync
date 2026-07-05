@@ -36,7 +36,7 @@ contacts-sync status                                     # see contact counts an
 contacts-sync version                                    # print the installed version
 ```
 
-Set `CONTACTS_SYNC_MS_CLIENT_ID` in your environment to avoid passing `--microsoft-client-id` every time (it's read as the option's envvar, so `--microsoft-client-id` can be omitted once it's set).
+Set `MICROSOFT_CLIENT_ID` in your environment to avoid passing `--microsoft-client-id` every time (it's read as the option's envvar, so `--microsoft-client-id` can be omitted once it's set).
 
 ## Known limitations
 
