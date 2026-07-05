@@ -96,6 +96,36 @@ def test_migrate_is_idempotent_and_etag_column_exists(tmp_path):
     assert database.get_link_etag("google", "people/1") == "etag-x"
 
 
+def test_create_and_get_contact_with_photo(db):
+    contact = CanonicalContact(
+        display_name="Jane Doe", photo_data=b"fake-jpeg-bytes", photo_content_type="image/jpeg"
+    )
+    contact_id = db.create_contact(contact)
+    fetched = db.get_contact(contact_id)
+    assert fetched.photo_data == b"fake-jpeg-bytes"
+    assert fetched.photo_content_type == "image/jpeg"
+
+
+def test_update_contact_photo(db):
+    contact_id = db.create_contact(CanonicalContact(display_name="Jane Doe"))
+    contact = db.get_contact(contact_id)
+    contact.photo_data = b"updated-bytes"
+    contact.photo_content_type = "image/png"
+    db.update_contact(contact)
+    fetched = db.get_contact(contact_id)
+    assert fetched.photo_data == b"updated-bytes"
+    assert fetched.photo_content_type == "image/png"
+
+
+def test_migrate_is_idempotent_with_photo_columns(tmp_path):
+    database = Database(str(tmp_path / "photo-idempotent.db"))
+    database.migrate()
+    database.migrate()  # must not error even though photo columns already exist
+
+    contact_id = database.create_contact(CanonicalContact(display_name="Jane", photo_data=b"x"))
+    assert database.get_contact(contact_id).photo_data == b"x"
+
+
 def test_sync_token_roundtrip(db):
     assert db.get_sync_token("google") is None
     db.set_sync_token("google", "token-abc")

@@ -90,16 +90,29 @@ class Database:
             }
             if "etag" not in existing_cols:
                 conn.execute("ALTER TABLE provider_links ADD COLUMN etag TEXT")
+            # contacts.photo_data/photo_content_type were added after the initial
+            # schema (replacing the never-implemented photo_url stub column,
+            # which is left in place rather than dropped to avoid a destructive
+            # migration on existing databases). Same guarded-ALTER pattern as
+            # provider_links.etag above.
+            existing_contact_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(contacts)").fetchall()
+            }
+            if "photo_data" not in existing_contact_cols:
+                conn.execute("ALTER TABLE contacts ADD COLUMN photo_data BLOB")
+            if "photo_content_type" not in existing_contact_cols:
+                conn.execute("ALTER TABLE contacts ADD COLUMN photo_content_type TEXT")
 
     def create_contact(self, contact: CanonicalContact) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO contacts (display_name, given_name, family_name, notes, "
-                "organization, title, photo_url, groups_json, field_meta_json, extra_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "organization, title, photo_data, photo_content_type, groups_json, "
+                "field_meta_json, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     contact.display_name, contact.given_name, contact.family_name,
-                    contact.notes, contact.organization, contact.title, contact.photo_url,
+                    contact.notes, contact.organization, contact.title,
+                    contact.photo_data, contact.photo_content_type,
                     json.dumps(contact.groups), json.dumps(contact.field_meta),
                     json.dumps(contact.extra),
                 ),
@@ -119,11 +132,12 @@ class Database:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE contacts SET display_name = ?, given_name = ?, family_name = ?, "
-                "notes = ?, organization = ?, title = ?, photo_url = ?, groups_json = ?, "
-                "field_meta_json = ?, extra_json = ? WHERE id = ?",
+                "notes = ?, organization = ?, title = ?, photo_data = ?, photo_content_type = ?, "
+                "groups_json = ?, field_meta_json = ?, extra_json = ? WHERE id = ?",
                 (
                     contact.display_name, contact.given_name, contact.family_name,
-                    contact.notes, contact.organization, contact.title, contact.photo_url,
+                    contact.notes, contact.organization, contact.title,
+                    contact.photo_data, contact.photo_content_type,
                     json.dumps(contact.groups), json.dumps(contact.field_meta),
                     json.dumps(contact.extra), contact.id,
                 ),
@@ -284,7 +298,8 @@ class Database:
             notes=row["notes"],
             organization=row["organization"],
             title=row["title"],
-            photo_url=row["photo_url"],
+            photo_data=row["photo_data"],
+            photo_content_type=row["photo_content_type"],
             groups=json.loads(row["groups_json"]),
             field_meta=json.loads(row["field_meta_json"]),
             extra=json.loads(row["extra_json"]),
