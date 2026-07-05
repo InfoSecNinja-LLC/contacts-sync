@@ -138,12 +138,15 @@ def _to_canonical(person: dict, access_token: Optional[str] = None) -> Canonical
     photo_content_type = None
     non_default_photos = [p for p in person.get("photos", []) if not p.get("default")]
     if non_default_photos and access_token:
-        response = requests.get(
-            non_default_photos[0]["url"], headers={"Authorization": f"Bearer {access_token}"}
-        )
-        response.raise_for_status()
-        photo_data = response.content
-        photo_content_type = response.headers.get("Content-Type", "").split(";")[0].strip() or None
+        try:
+            response = requests.get(
+                non_default_photos[0]["url"], headers={"Authorization": f"Bearer {access_token}"}
+            )
+            response.raise_for_status()
+            photo_data = response.content
+            photo_content_type = response.headers.get("Content-Type", "").split(";")[0].strip() or None
+        except requests.exceptions.RequestException:
+            pass
     return CanonicalContact(
         display_name=names.get("displayName", ""),
         given_name=names.get("givenName"),

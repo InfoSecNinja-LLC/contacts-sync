@@ -1,4 +1,5 @@
 import pytest
+import requests
 from googleapiclient.errors import HttpError
 
 from contacts_sync.adapters.google import PERSON_FIELDS, GoogleAdapter
@@ -440,3 +441,24 @@ def test_list_changes_strips_parameters_from_content_type_header(mocker):
     change_set = adapter.list_changes(None)
 
     assert change_set.changes[0].contact.photo_content_type == "image/jpeg"
+
+
+def test_list_changes_skips_photo_on_fetch_failure(mocker):
+    person_with_photo = {
+        **FAKE_PERSON,
+        "photos": [{"url": "https://photo.example/jane.jpg", "default": False}],
+    }
+    service = _fake_service(mocker, {"connections": [person_with_photo], "nextSyncToken": "sync-2"})
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    mocker.patch(
+        "contacts_sync.adapters.google.requests.get",
+        side_effect=requests.exceptions.ConnectionError("network blip"),
+    )
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+
+    change_set = adapter.list_changes(None)
+
+    # The photo fetch failed, but the contact itself and the rest of list_changes
+    # must still succeed - a bad photo must not abort the whole provider sync.
+    assert change_set.changes[0].contact.photo_data is None
+    assert change_set.next_sync_token == "sync-2"
