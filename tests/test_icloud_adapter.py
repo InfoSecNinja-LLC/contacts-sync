@@ -849,3 +849,44 @@ def test_update_raises_resource_gone_on_404(requests_mock):
     adapter = ICloudAdapter("me@icloud.com", "app-pass", ADDRESSBOOK)
     with pytest.raises(ProviderResourceGoneError):
         adapter.update(href, CanonicalContact(id=5, display_name="Jane", emails=[Email(value="j@e.com")]))
+
+
+def test_to_canonical_decodes_embedded_photo():
+    vcard = vobject.readOne(
+        "BEGIN:VCARD\nVERSION:3.0\nFN:Jane Doe\n"
+        "PHOTO;ENCODING=b;TYPE=JPEG:ZmFrZS1qcGVnLWJ5dGVz\nEND:VCARD\n"
+    )
+
+    canonical = _to_canonical(vcard)
+
+    assert canonical.photo_data == b"fake-jpeg-bytes"
+    assert canonical.photo_content_type == "image/jpeg"
+
+
+def test_to_canonical_handles_vcard_without_photo():
+    vcard = vobject.readOne("BEGIN:VCARD\nVERSION:3.0\nFN:Jane Doe\nEND:VCARD\n")
+
+    canonical = _to_canonical(vcard)
+
+    assert canonical.photo_data is None
+    assert canonical.photo_content_type is None
+
+
+def test_to_vcard_embeds_photo_when_present():
+    contact = CanonicalContact(id=1, display_name="Jane Doe", photo_data=b"fake-png-bytes", photo_content_type="image/png")
+
+    vcard = _to_vcard(contact)
+
+    assert hasattr(vcard, "photo")
+    assert vcard.photo.type_param == "PNG"
+    # Round-trip through serialize/parse to confirm the base64 encoding is correct.
+    parsed = vobject.readOne(vcard.serialize())
+    assert parsed.photo.value == b"fake-png-bytes"
+
+
+def test_to_vcard_omits_photo_when_absent():
+    contact = CanonicalContact(id=1, display_name="Jane Doe")
+
+    vcard = _to_vcard(contact)
+
+    assert not hasattr(vcard, "photo")

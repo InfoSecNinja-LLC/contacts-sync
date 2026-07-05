@@ -344,6 +344,18 @@ def _discover_addressbook_collection(home_set_url: str, auth) -> str:
     return urljoin(home_set_url, preferred)
 
 
+def _content_type_to_vcard_type(content_type) -> str:
+    if not content_type:
+        return "JPEG"
+    return content_type.split("/")[-1].upper()
+
+
+def _vcard_type_to_content_type(type_param) -> str:
+    if not type_param:
+        return "image/jpeg"
+    return f"image/{type_param.lower()}"
+
+
 def _to_canonical(vcard) -> CanonicalContact:
     emails = [Email(value=e.value) for e in getattr(vcard, "email_list", [])]
     phones = [Phone(value=t.value) for t in getattr(vcard, "tel_list", [])]
@@ -352,6 +364,11 @@ def _to_canonical(vcard) -> CanonicalContact:
     if hasattr(vcard, "n"):
         given_name = vcard.n.value.given or None
         family_name = vcard.n.value.family or None
+    photo_data = None
+    photo_content_type = None
+    if hasattr(vcard, "photo"):
+        photo_data = vcard.photo.value
+        photo_content_type = _vcard_type_to_content_type(getattr(vcard.photo, "type_param", None))
     return CanonicalContact(
         display_name=vcard.fn.value if hasattr(vcard, "fn") else "",
         given_name=given_name,
@@ -359,6 +376,8 @@ def _to_canonical(vcard) -> CanonicalContact:
         emails=emails,
         phones=phones,
         notes=vcard.note.value if hasattr(vcard, "note") else None,
+        photo_data=photo_data,
+        photo_content_type=photo_content_type,
     )
 
 
@@ -379,4 +398,9 @@ def _to_vcard(contact: CanonicalContact):
         vcard.add("tel").value = phone.value
     if contact.notes:
         vcard.add("note").value = contact.notes
+    if contact.photo_data:
+        photo = vcard.add("photo")
+        photo.value = contact.photo_data
+        photo.encoding_param = "b"
+        photo.type_param = _content_type_to_vcard_type(contact.photo_content_type)
     return vcard
