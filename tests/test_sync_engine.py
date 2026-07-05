@@ -604,3 +604,74 @@ def test_noop_merge_does_not_repush_but_records_etag(db):
     assert result.updated == 0                         # no real change
     assert microsoft.updated == []                     # not re-pushed anywhere
     assert db.get_link_etag("google", "g-1") == "new-etag"  # etag still refreshed
+
+
+def test_incoming_photo_is_merged_onto_existing_contact(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com")],
+            photo_data=b"new-photo-bytes",
+            photo_content_type="image/jpeg",
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    engine = SyncEngine(db, {"google": google})
+
+    result = engine.run()
+
+    updated_contact = db.get_contact(existing_id)
+    assert updated_contact.photo_data == b"new-photo-bytes"
+    assert updated_contact.photo_content_type == "image/jpeg"
+    assert result.updated == 1
+
+
+def test_photo_only_change_marks_contact_dirty_for_repush(db):
+    existing_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]))
+    db.link_provider(existing_id, "google", "g-1")
+    db.link_provider(existing_id, "microsoft", "ms-1")
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com")],
+            photo_data=b"new-photo-bytes",
+            photo_content_type="image/jpeg",
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    microsoft = FakeAdapter("microsoft")
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    engine.run()
+
+    assert [pid for pid, _ in microsoft.updated] == ["ms-1"]
+    assert microsoft.updated[0][1].photo_data == b"new-photo-bytes"
+
+
+def test_no_incoming_photo_keeps_existing_photo(db):
+    existing_id = db.create_contact(
+        CanonicalContact(display_name="Jane", photo_data=b"existing-bytes", photo_content_type="image/jpeg")
+    )
+    db.link_provider(existing_id, "google", "g-1")
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(display_name="Jane Updated"),
+        updated_at="2026-01-02T00:00:00Z",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    engine = SyncEngine(db, {"google": google})
+
+    engine.run()
+
+    updated_contact = db.get_contact(existing_id)
+    assert updated_contact.photo_data == b"existing-bytes"
+    assert updated_contact.photo_content_type == "image/jpeg"

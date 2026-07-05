@@ -1,5 +1,7 @@
+import base64
 from typing import Optional
 
+import requests
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -11,13 +13,14 @@ from contacts_sync.adapters.base import (
 )
 from contacts_sync.models import CanonicalContact, Email, Phone
 
-PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies"
+PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies,photos"
 
 
 class GoogleAdapter:
     name = "google"
 
     def __init__(self, credentials):
+        self._credentials = credentials
         self._service = build("people", "v1", credentials=credentials)
 
     def list_changes(self, since_token):
@@ -44,7 +47,7 @@ class GoogleAdapter:
                     changes.append(
                         ChangedContact(
                             provider_id=person["resourceName"],
-                            contact=_to_canonical(person),
+                            contact=_to_canonical(person, self._credentials.token),
                             updated_at="",
                             etag=person.get("etag"),
                         )
@@ -65,7 +68,13 @@ class GoogleAdapter:
     def create(self, contact: CanonicalContact) -> tuple[str, Optional[str]]:
         body = _to_person(contact)
         response = self._service.people().createContact(body=body).execute(num_retries=5)
-        return response["resourceName"], response.get("etag")
+        resource_name = response["resourceName"]
+        if contact.photo_data:
+            self._service.people().updateContactPhoto(
+                resourceName=resource_name,
+                body={"photoBytes": base64.b64encode(contact.photo_data).decode()},
+            ).execute(num_retries=5)
+        return resource_name, response.get("etag")
 
     def update(self, provider_id: str, contact: CanonicalContact) -> Optional[str]:
         body = _to_person(contact)
@@ -99,6 +108,11 @@ class GoogleAdapter:
             response = self._service.people().updateContact(
                 resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
             ).execute(num_retries=5)
+        if contact.photo_data:
+            self._service.people().updateContactPhoto(
+                resourceName=provider_id,
+                body={"photoBytes": base64.b64encode(contact.photo_data).decode()},
+            ).execute(num_retries=5)
         return response.get("etag") if isinstance(response, dict) else None
 
     def delete(self, provider_id: str) -> None:
@@ -115,11 +129,24 @@ def _is_not_found(exc: HttpError) -> bool:
     return status == 404
 
 
-def _to_canonical(person: dict) -> CanonicalContact:
+def _to_canonical(person: dict, access_token: Optional[str] = None) -> CanonicalContact:
     names = person.get("names", [{}])[0] if person.get("names") else {}
     emails = [Email(value=e["value"]) for e in person.get("emailAddresses", [])]
     phones = [Phone(value=p["value"]) for p in person.get("phoneNumbers", [])]
     notes = person.get("biographies", [{}])[0].get("value") if person.get("biographies") else None
+    photo_data = None
+    photo_content_type = None
+    non_default_photos = [p for p in person.get("photos", []) if not p.get("default")]
+    if non_default_photos and access_token:
+        try:
+            response = requests.get(
+                non_default_photos[0]["url"], headers={"Authorization": f"Bearer {access_token}"}
+            )
+            response.raise_for_status()
+            photo_data = response.content
+            photo_content_type = response.headers.get("Content-Type", "").split(";")[0].strip() or None
+        except requests.exceptions.RequestException:
+            pass
     return CanonicalContact(
         display_name=names.get("displayName", ""),
         given_name=names.get("givenName"),
@@ -127,6 +154,8 @@ def _to_canonical(person: dict) -> CanonicalContact:
         emails=emails,
         phones=phones,
         notes=notes,
+        photo_data=photo_data,
+        photo_content_type=photo_content_type,
         extra={"google_etag": person.get("etag")},
     )
 

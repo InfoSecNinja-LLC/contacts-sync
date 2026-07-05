@@ -23,6 +23,7 @@ def test_list_changes_maps_contact_and_captures_delta_link(requests_mock):
             "@odata.deltaLink": f"{BASE}/me/contactFolders/contacts/contacts/delta?$deltatoken=abc",
         },
     )
+    requests_mock.get(f"{BASE}/me/contacts/AAMk123/photo/$value", status_code=404)
     adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
 
     change_set = adapter.list_changes(None)
@@ -79,6 +80,7 @@ def test_list_changes_populates_changed_contact_etag(requests_mock):
             "@odata.deltaLink": f"{BASE}/x?$deltatoken=y",
         },
     )
+    requests_mock.get(f"{BASE}/me/contacts/AAMk123/photo/$value", status_code=404)
     adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
 
     change_set = adapter.list_changes(None)
@@ -173,3 +175,109 @@ def test_update_raises_resource_gone_on_404(requests_mock):
     adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
     with pytest.raises(ProviderResourceGoneError):
         adapter.update("AAMkGONE", CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+
+def test_list_changes_fetches_photo_for_changed_contact(requests_mock):
+    requests_mock.get(
+        f"{BASE}/me/contactFolders/contacts/contacts/delta",
+        json={
+            "value": [{"id": "AAMk123", "displayName": "Jane Doe", "emailAddresses": [{"address": "jane@example.com"}]}],
+            "@odata.deltaLink": f"{BASE}/x?$deltatoken=y",
+        },
+    )
+    requests_mock.get(
+        f"{BASE}/me/contacts/AAMk123/photo/$value",
+        content=b"fake-photo-bytes",
+        headers={"Content-Type": "image/jpeg"},
+    )
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.photo_data == b"fake-photo-bytes"
+    assert change_set.changes[0].contact.photo_content_type == "image/jpeg"
+
+
+def test_list_changes_strips_parameters_from_content_type_header(requests_mock):
+    requests_mock.get(
+        f"{BASE}/me/contactFolders/contacts/contacts/delta",
+        json={
+            "value": [{"id": "AAMk123", "displayName": "Jane Doe"}],
+            "@odata.deltaLink": f"{BASE}/x?$deltatoken=y",
+        },
+    )
+    requests_mock.get(
+        f"{BASE}/me/contacts/AAMk123/photo/$value",
+        content=b"fake-photo-bytes",
+        headers={"Content-Type": "image/jpeg; charset=binary"},
+    )
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.photo_content_type == "image/jpeg"
+
+
+def test_list_changes_treats_404_photo_as_no_photo(requests_mock):
+    requests_mock.get(
+        f"{BASE}/me/contactFolders/contacts/contacts/delta",
+        json={
+            "value": [{"id": "AAMk123", "displayName": "Jane Doe"}],
+            "@odata.deltaLink": f"{BASE}/x?$deltatoken=y",
+        },
+    )
+    requests_mock.get(f"{BASE}/me/contacts/AAMk123/photo/$value", status_code=404)
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.photo_data is None
+
+
+def test_create_pushes_photo_bytes(requests_mock):
+    requests_mock.post(f"{BASE}/me/contacts", json={"id": "AAMk-new"})
+    photo_put = requests_mock.put(f"{BASE}/me/contacts/AAMk-new/photo/$value", status_code=204)
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    contact = CanonicalContact(
+        display_name="New", emails=[Email(value="n@e.com")],
+        photo_data=b"fake-photo-bytes", photo_content_type="image/jpeg",
+    )
+    adapter.create(contact)
+
+    assert photo_put.call_count == 1
+    assert requests_mock.last_request.body == b"fake-photo-bytes"
+    assert requests_mock.last_request.headers["Content-Type"] == "image/jpeg"
+
+
+def test_update_does_not_push_photo_when_absent(requests_mock):
+    requests_mock.patch(f"{BASE}/me/contacts/AAMk1", json={"id": "AAMk1"})
+    photo_put = requests_mock.put(f"{BASE}/me/contacts/AAMk1/photo/$value", status_code=204)
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    adapter.update("AAMk1", CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+    assert photo_put.call_count == 0
+
+
+def test_list_changes_skips_photo_on_fetch_failure(requests_mock):
+    import requests
+    requests_mock.get(
+        f"{BASE}/me/contactFolders/contacts/contacts/delta",
+        json={
+            "value": [{"id": "AAMk123", "displayName": "Jane Doe"}],
+            "@odata.deltaLink": f"{BASE}/x?$deltatoken=y",
+        },
+    )
+    requests_mock.get(
+        f"{BASE}/me/contacts/AAMk123/photo/$value",
+        exc=requests.exceptions.ConnectionError("network blip"),
+    )
+    adapter = MicrosoftAdapter(token_provider=lambda: "fake-token")
+
+    change_set = adapter.list_changes(None)
+
+    # The photo fetch failed, but the contact and the rest of list_changes must
+    # still succeed - a bad photo fetch must not abort the whole provider sync.
+    assert change_set.changes[0].contact.photo_data is None
+    assert change_set.next_sync_token.endswith("$deltatoken=y")
