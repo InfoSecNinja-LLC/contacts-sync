@@ -6,12 +6,12 @@ def test_run_device_code_auth_saves_token_cache(mocker):
     fake_app.initiate_device_flow.return_value = {"message": "go to https://microsoft.com/devicelogin"}
     mocker.patch("contacts_sync.auth.microsoft_auth.msal.PublicClientApplication", return_value=fake_app)
     mocker.patch("contacts_sync.auth.microsoft_auth._load_cache", return_value=mocker.Mock(has_state_changed=True, serialize=lambda: "cache-blob"))
-    save_mock = mocker.patch("contacts_sync.auth.microsoft_auth.op_set_field")
+    save_mock = mocker.patch("contacts_sync.auth.microsoft_auth.env_set")
 
     microsoft_auth.run_device_code_auth("client-id-1")
 
     fake_app.acquire_token_by_device_flow.assert_called_once()
-    save_mock.assert_called_once_with("Private", "microsoft", "token_cache", "cache-blob")
+    save_mock.assert_called_once_with("MICROSOFT_TOKEN_CACHE", "cache-blob")
 
 
 def test_get_token_provider_uses_cached_account(mocker):
@@ -59,6 +59,6 @@ def test_get_token_provider_caches_token_across_calls(mocker):
     t3 = get_token()
 
     assert t1 == t2 == t3 == "tok-1"
-    # 1Password (_load_cache) and MSAL acquisition happen ONCE, not per call.
+    # .env (_load_cache) and MSAL acquisition happen ONCE, not per call.
     assert load_cache.call_count == 1
     assert fake_app.acquire_token_silent.call_count == 1

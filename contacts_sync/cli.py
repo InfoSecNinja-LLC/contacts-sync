@@ -1,6 +1,8 @@
 import logging
 
 import typer
+from dotenv import load_dotenv
+
 from contacts_sync.db import Database
 from contacts_sync.sync_engine import SyncEngine
 from contacts_sync.auth import google_auth, microsoft_auth, icloud_auth
@@ -17,6 +19,8 @@ def _configure_logging():
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         logger.addHandler(handler)
 
+
+load_dotenv()
 
 app = typer.Typer()
 auth_app = typer.Typer()
@@ -38,19 +42,19 @@ def version():
 @auth_app.command("google")
 def auth_google(client_secrets: str = typer.Option(..., help="Path to Google OAuth client_secrets.json")):
     google_auth.run_installed_app_auth(client_secrets)
-    typer.echo("Google credentials saved to 1Password.")
+    typer.echo("Google credentials saved to .env.")
 
 
 @auth_app.command("microsoft")
 def auth_microsoft(client_id: str = typer.Option(..., help="Entra app registration client ID")):
     microsoft_auth.run_device_code_auth(client_id)
-    typer.echo("Microsoft credentials saved to 1Password.")
+    typer.echo("Microsoft credentials saved to .env.")
 
 
 @auth_app.command("icloud")
 def auth_icloud():
     icloud_auth.run_icloud_auth()
-    typer.echo("iCloud credentials saved to 1Password.")
+    typer.echo("iCloud credentials saved to .env.")
 
 
 def _build_adapters(microsoft_client_id: str) -> dict:
