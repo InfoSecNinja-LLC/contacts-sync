@@ -2,7 +2,7 @@ import pytest
 import requests
 from googleapiclient.errors import HttpError
 
-from contacts_sync.adapters.google import PERSON_FIELDS, GoogleAdapter
+from contacts_sync.adapters.google import PERSON_FIELDS, UPDATE_PERSON_FIELDS, GoogleAdapter
 from contacts_sync.adapters.base import SyncTokenExpiredError
 
 FAKE_PERSON = {
@@ -207,9 +207,10 @@ def test_update_does_not_clobber_addresses_or_organizations(mocker):
     people.updateContact.assert_called_once()
     _, kwargs = people.updateContact.call_args
     assert kwargs["resourceName"] == "people/123"
-    assert kwargs["updatePersonFields"] == PERSON_FIELDS
-    assert "addresses" not in PERSON_FIELDS
-    assert "organizations" not in PERSON_FIELDS
+    assert kwargs["updatePersonFields"] == UPDATE_PERSON_FIELDS
+    assert "addresses" not in UPDATE_PERSON_FIELDS
+    assert "organizations" not in UPDATE_PERSON_FIELDS
+    assert "photos" not in UPDATE_PERSON_FIELDS
     body = kwargs["body"]
     assert "addresses" not in body
     assert "organizations" not in body
