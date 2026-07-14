@@ -28,9 +28,20 @@ class SyncResult:
 
 
 class SyncEngine:
-    def __init__(self, db: Database, adapters: dict):
+    def __init__(self, db: Database, adapters: dict, progress=None):
         self._db = db
         self._adapters = adapters
+        # Optional progress hook: a callable `(event: str, **kwargs)` invoked
+        # at pull/merge/push milestones so a UI (e.g. the CLI's rich bars) can
+        # display progress. Defaults to a no-op so library callers and tests
+        # don't have to care. Events:
+        #   pull_start(provider)         - provider pull (network) beginning
+        #   pull_done(provider, total)   - pull finished; `total` changes to merge
+        #   change_done(provider)        - one pulled change processed
+        #   provider_error(provider)     - provider aborted with an error
+        #   push_start(total)            - push phase beginning over `total` contacts
+        #   push_advance()               - one contact's push processed
+        self._progress = progress if progress is not None else (lambda event, **kwargs: None)
 
     def run(self, dry_run: bool = False) -> SyncResult:
         errors = {}
@@ -42,14 +53,28 @@ class SyncEngine:
 
         for name, adapter in self._adapters.items():
             try:
+                self._progress("pull_start", provider=name)
                 token = self._db.get_sync_token(name)
                 try:
                     change_set = adapter.list_changes(token)
                 except SyncTokenExpiredError:
                     change_set = adapter.list_changes(None)
+                self._progress("pull_done", provider=name, total=len(change_set.changes))
 
                 for change in change_set.changes:
+                    self._progress("change_done", provider=name)
                     contact_id = self._db.get_link(name, change.provider_id)
+                    # Capture the previously-stored etag NOW, before any code
+                    # below records this change's etag. Echo suppression must
+                    # compare against what we knew BEFORE this change arrived;
+                    # reading it after the first-time-match branch has already
+                    # stored change.etag would make every first match look like
+                    # an echo of itself, silently dropping the provider's data
+                    # (this exact bug once discarded structured names and
+                    # photos from the second provider on initial sync).
+                    pre_existing_etag = (
+                        self._db.get_link_etag(name, change.provider_id) if contact_id is not None else None
+                    )
 
                     if change.deleted:
                         if contact_id:
@@ -102,8 +127,11 @@ class SyncEngine:
                     # last observed/wrote for the resource, it's either our own
                     # write coming back or an unchanged resource. Skip it
                     # entirely so it never becomes dirty and never gets re-pushed.
-                    stored_etag = self._db.get_link_etag(name, change.provider_id)
-                    if change.etag is not None and stored_etag is not None and change.etag == stored_etag:
+                    # Compares against the etag captured BEFORE this change was
+                    # processed - a link established earlier in this very loop
+                    # iteration (first-time match) has pre_existing_etag=None and
+                    # must still be merged.
+                    if change.etag is not None and pre_existing_etag is not None and change.etag == pre_existing_etag:
                         logger.debug(
                             f"SKIP-ECHO provider={name} provider_id={change.provider_id} etag={change.etag}"
                         )
@@ -123,6 +151,7 @@ class SyncEngine:
                     self._db.set_sync_token(name, change_set.next_sync_token)
             except Exception as exc:
                 errors[name] = str(exc)
+                self._progress("provider_error", provider=name)
 
         if not dry_run:
             self._push_to_providers(errors, dirty_ids)
@@ -233,8 +262,25 @@ class SyncEngine:
             )
         return changed
 
+    def push_contacts(self, contact_ids) -> dict:
+        """Push the given locally-modified contacts to every linked provider
+        (and create any contact on providers it isn't linked to yet).
+
+        `run` only pushes contacts dirtied by its own pull phase, so repair
+        commands that edit the local store directly (e.g. fix-names) must
+        call this to get their changes out - otherwise the edits would sit in
+        the database forever, since the next pull would see no provider-side
+        change and never mark the contacts dirty.
+        """
+        errors: dict = {}
+        self._push_to_providers(errors, set(contact_ids))
+        return errors
+
     def _push_to_providers(self, errors, dirty_ids):
-        for contact in self._db.list_contacts():
+        contacts = self._db.list_contacts()
+        self._progress("push_start", total=len(contacts))
+        for contact in contacts:
+            self._progress("push_advance")
             links = self._db.get_links_for_contact(contact.id)
             for name, adapter in self._adapters.items():
                 if name in errors:

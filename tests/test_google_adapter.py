@@ -463,3 +463,37 @@ def test_list_changes_skips_photo_on_fetch_failure(mocker):
     # must still succeed - a bad photo must not abort the whole provider sync.
     assert change_set.changes[0].contact.photo_data is None
     assert change_set.next_sync_token == "sync-2"
+
+
+def test_photo_url_size_suffix_is_rewritten_to_original_size():
+    from contacts_sync.adapters.google import _full_size_photo_url
+
+    assert (
+        _full_size_photo_url("https://lh3.googleusercontent.com/abc123=s100")
+        == "https://lh3.googleusercontent.com/abc123=s0"
+    )
+    assert (
+        _full_size_photo_url("https://lh3.googleusercontent.com/abc123=s100-c")
+        == "https://lh3.googleusercontent.com/abc123=s0"
+    )
+    # URLs without a recognizable size directive are left untouched.
+    assert _full_size_photo_url("https://photo.example/jane.jpg") == "https://photo.example/jane.jpg"
+
+
+def test_list_changes_requests_original_size_photo(mocker):
+    person_with_photo = {
+        "resourceName": "people/1", "etag": "e1",
+        "photos": [{"url": "https://lh3.googleusercontent.com/abc123=s100", "default": False}],
+    }
+    service = _fake_service(mocker, {"connections": [person_with_photo], "nextSyncToken": "sync-2"})
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+    fake_response = mocker.Mock(content=b"full-size-bytes", headers={"Content-Type": "image/jpeg"})
+    get_mock = mocker.patch("contacts_sync.adapters.google.requests.get", return_value=fake_response)
+
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+    adapter.list_changes(None)
+
+    get_mock.assert_called_once_with(
+        "https://lh3.googleusercontent.com/abc123=s0",
+        headers={"Authorization": "Bearer fake-token"},
+    )
