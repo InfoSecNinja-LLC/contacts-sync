@@ -820,8 +820,8 @@ def test_pushed_photo_echo_does_not_replace_canonical_photo(db):
 def test_item_rejected_push_is_logged_and_does_not_abort_provider(db):
     from contacts_sync.adapters.base import ProviderItemRejectedError
 
-    first_id = db.create_contact(CanonicalContact(display_name="Rejected", emails=[Email(value="r@e.com")]))
-    second_id = db.create_contact(CanonicalContact(display_name="Fine", emails=[Email(value="f@e.com")]))
+    db.create_contact(CanonicalContact(display_name="Rejected", emails=[Email(value="r@e.com")]))
+    db.create_contact(CanonicalContact(display_name="Fine", emails=[Email(value="f@e.com")]))
 
     class RejectsFirstAdapter(FakeAdapter):
         def create(self, contact):

@@ -171,7 +171,7 @@ def test_fix_names_apply_aborts_before_writing_when_credentials_missing(mocker, 
 
 
 def test_push_all_pushes_every_contact(mocker, tmp_path):
-    database, contact_id = _seed_unsplit_contact(mocker, tmp_path)
+    _seed_unsplit_contact(mocker, tmp_path)
     adapter = mocker.Mock()
     adapter.update.return_value = "etag-pushed"
     mocker.patch("contacts_sync.cli._build_adapters", return_value={"google": adapter})
