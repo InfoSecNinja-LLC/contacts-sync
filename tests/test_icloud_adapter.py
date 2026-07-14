@@ -890,3 +890,78 @@ def test_to_vcard_omits_photo_when_absent():
     vcard = _to_vcard(contact)
 
     assert not hasattr(vcard, "photo")
+
+
+def _big_photo_bytes():
+    """A JPEG guaranteed to exceed MAX_PHOTO_BYTES (random noise compresses badly)."""
+    import io
+    import random
+
+    from PIL import Image
+
+    random.seed(42)
+    image = Image.new("RGB", (1600, 1600))
+    image.putdata([
+        (random.randrange(256), random.randrange(256), random.randrange(256))
+        for _ in range(1600 * 1600)
+    ])
+    buffer = io.BytesIO()
+    image.save(buffer, "JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def test_to_vcard_shrinks_oversized_photo_and_records_pushed_sha():
+    import hashlib
+
+    from contacts_sync.adapters.icloud import MAX_PHOTO_BYTES
+
+    big = _big_photo_bytes()
+    assert len(big) > MAX_PHOTO_BYTES  # sanity: the fixture really is oversized
+    contact = CanonicalContact(
+        id=1, display_name="Big Photo", photo_data=big, photo_content_type="image/png"
+    )
+
+    vcard = _to_vcard(contact)
+
+    sent = vcard.photo.value
+    assert len(sent) <= MAX_PHOTO_BYTES
+    assert vcard.photo.type_param == "JPEG"
+    # Canonical bytes are untouched; only the pushed copy is shrunk.
+    assert contact.photo_data == big
+    # The pushed copy's hash is recorded so the engine can recognize the echo.
+    assert contact.extra["icloud_pushed_photo_sha"] == hashlib.sha256(sent).hexdigest()
+
+
+def test_to_vcard_keeps_small_photo_unchanged():
+    import hashlib
+
+    small = b"small-jpeg-bytes"
+    contact = CanonicalContact(
+        id=1, display_name="Small Photo", photo_data=small, photo_content_type="image/jpeg"
+    )
+
+    vcard = _to_vcard(contact)
+
+    assert vcard.photo.value == small
+    assert contact.extra["icloud_pushed_photo_sha"] == hashlib.sha256(small).hexdigest()
+
+
+def test_update_rejected_status_raises_item_rejected(requests_mock):
+    from contacts_sync.adapters.base import ProviderItemRejectedError
+
+    href = f"{BASE}{ADDRESSBOOK}50.vcf"
+    requests_mock.put(href, status_code=403)
+    adapter = ICloudAdapter("user@icloud.com", "app-pass", ADDRESSBOOK)
+
+    with pytest.raises(ProviderItemRejectedError):
+        adapter.update(href, CanonicalContact(id=50, display_name="Jane"))
+
+
+def test_create_rejected_status_raises_item_rejected(requests_mock):
+    from contacts_sync.adapters.base import ProviderItemRejectedError
+
+    requests_mock.put(f"{BASE}{ADDRESSBOOK}50.vcf", status_code=403)
+    adapter = ICloudAdapter("user@icloud.com", "app-pass", ADDRESSBOOK)
+
+    with pytest.raises(ProviderItemRejectedError):
+        adapter.create(CanonicalContact(id=50, display_name="Jane"))

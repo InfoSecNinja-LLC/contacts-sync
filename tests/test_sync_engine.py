@@ -776,3 +776,82 @@ def test_default_progress_is_noop(db):
     google = FakeAdapter("google")
     result = SyncEngine(db, {"google": google}).run()
     assert result.provider_errors == {}
+
+
+def test_pushed_photo_echo_does_not_replace_canonical_photo(db):
+    """A pull returning the exact bytes we last pushed to that provider (e.g.
+    a photo shrunk to fit iCloud's size limit) must not replace the
+    full-resolution canonical photo."""
+    import hashlib
+
+    full_res = b"full-resolution-bytes" * 1000
+    shrunk = b"shrunk-for-icloud"
+    existing_id = db.create_contact(
+        CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com")],
+            photo_data=full_res,
+            photo_content_type="image/jpeg",
+            extra={"icloud_pushed_photo_sha": hashlib.sha256(shrunk).hexdigest()},
+        )
+    )
+    db.link_provider(existing_id, "icloud", "i-1")
+
+    incoming = ChangedContact(
+        provider_id="i-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com")],
+            photo_data=shrunk,
+            photo_content_type="image/jpeg",
+        ),
+        updated_at="",
+        etag='"new-etag"',
+    )
+    engine = SyncEngine(db, {"icloud": FakeAdapter("icloud", changes=[incoming])})
+
+    result = engine.run()
+
+    merged = db.get_contact(existing_id)
+    assert merged.photo_data == full_res
+    assert result.updated == 0  # echo recognized: nothing changed, nothing re-pushed
+
+
+def test_item_rejected_push_is_logged_and_does_not_abort_provider(db):
+    from contacts_sync.adapters.base import ProviderItemRejectedError
+
+    first_id = db.create_contact(CanonicalContact(display_name="Rejected", emails=[Email(value="r@e.com")]))
+    second_id = db.create_contact(CanonicalContact(display_name="Fine", emails=[Email(value="f@e.com")]))
+
+    class RejectsFirstAdapter(FakeAdapter):
+        def create(self, contact):
+            if contact.display_name == "Rejected":
+                raise ProviderItemRejectedError("photo too large")
+            return super().create(contact)
+
+    adapter = RejectsFirstAdapter("icloud")
+    engine = SyncEngine(db, {"icloud": adapter})
+
+    result = engine.run()
+
+    # The rejected contact was skipped, the other still got created,
+    # and the provider is NOT marked errored.
+    assert result.rejected == 1
+    assert [c.display_name for c in adapter.created] == ["Fine"]
+    assert result.provider_errors == {}
+
+
+def test_push_persists_adapter_recorded_extra(db):
+    """Adapters may record bookkeeping (e.g. the sha of a shrunk photo) on
+    contact.extra during create/update; the engine must persist it."""
+    contact_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+    class RecordingAdapter(FakeAdapter):
+        def create(self, contact):
+            contact.extra["icloud_pushed_photo_sha"] = "abc123"
+            return super().create(contact)
+
+    engine = SyncEngine(db, {"icloud": RecordingAdapter("icloud")})
+    engine.run()
+
+    assert db.get_contact(contact_id).extra.get("icloud_pushed_photo_sha") == "abc123"

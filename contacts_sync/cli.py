@@ -101,7 +101,7 @@ def main():
 
 @app.command()
 def version():
-    typer.echo("contacts-sync 0.2.0")
+    typer.echo("contacts-sync 0.2.1")
 
 
 @auth_app.command("google")
@@ -169,6 +169,11 @@ def sync(
         f"Created: {result.created}, Updated: {result.updated}, "
         f"Deleted: {result.deleted}, Pending review: {result.pending_review}"
     )
+    if result.rejected:
+        typer.echo(
+            f"WARNING: {result.rejected} contact push(es) were rejected by a "
+            "provider (see PUSH-REJECTED lines in sync.log)."
+        )
     if result.provider_errors:
         for provider, error in result.provider_errors.items():
             typer.echo(f"ERROR [{provider}]: {error}")

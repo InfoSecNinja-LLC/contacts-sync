@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -5,7 +6,11 @@ from contacts_sync.db import Database
 from contacts_sync.matcher import canonicalize_phone, match_contact, normalize_email, normalize_phone
 from contacts_sync.merger import merge_single_value, merge_multi_value
 from contacts_sync.models import Email, Phone
-from contacts_sync.adapters.base import ProviderResourceGoneError, SyncTokenExpiredError
+from contacts_sync.adapters.base import (
+    ProviderItemRejectedError,
+    ProviderResourceGoneError,
+    SyncTokenExpiredError,
+)
 
 logger = logging.getLogger("contacts_sync.sync")
 
@@ -25,6 +30,10 @@ class SyncResult:
     updated: int = 0
     deleted: int = 0
     pending_review: int = 0
+    # Contact-pushes a provider refused for data reasons (e.g. an oversized
+    # photo iCloud wouldn't take even after shrinking). Logged per contact in
+    # sync.log; does not abort the provider.
+    rejected: int = 0
 
 
 class SyncEngine:
@@ -153,10 +162,11 @@ class SyncEngine:
                 errors[name] = str(exc)
                 self._progress("provider_error", provider=name)
 
+        rejected = 0
         if not dry_run:
-            self._push_to_providers(errors, dirty_ids)
+            rejected = self._push_to_providers(errors, dirty_ids)
 
-        return SyncResult(errors, created, updated, deleted, pending_review)
+        return SyncResult(errors, created, updated, deleted, pending_review, rejected)
 
     def _merge_into(self, existing_contact, change, provider_name, dry_run) -> bool:
         """Merge an incoming change into an existing canonical contact.
@@ -207,8 +217,18 @@ class SyncEngine:
         existing_contact.family_name = new_family_name
         meta["family_name"] = new_family_name_meta
 
+        # If the incoming photo is byte-identical to what WE last pushed to this
+        # provider (recorded by the adapter, e.g. after shrinking an oversized
+        # photo to fit iCloud's limit), it's our own write coming back - treat
+        # it as "no photo change" so a provider-specific downscaled copy can
+        # never replace the full-resolution canonical photo.
+        incoming_photo = incoming.photo_data
+        if incoming_photo is not None:
+            pushed_sha = existing_contact.extra.get(f"{provider_name}_pushed_photo_sha")
+            if pushed_sha and hashlib.sha256(incoming_photo).hexdigest() == pushed_sha:
+                incoming_photo = existing_contact.photo_data
         new_photo_data, new_photo_meta = merge_single_value(
-            existing_contact.photo_data, meta.get("photo"), incoming.photo_data, change.updated_at,
+            existing_contact.photo_data, meta.get("photo"), incoming_photo, change.updated_at,
         )
         if new_photo_data != existing_contact.photo_data:
             # photo_content_type always travels with whichever photo_data value
@@ -276,11 +296,13 @@ class SyncEngine:
         self._push_to_providers(errors, set(contact_ids))
         return errors
 
-    def _push_to_providers(self, errors, dirty_ids):
+    def _push_to_providers(self, errors, dirty_ids) -> int:
+        rejected = 0
         contacts = self._db.list_contacts()
         self._progress("push_start", total=len(contacts))
         for contact in contacts:
             self._progress("push_advance")
+            pushed_any = False
             links = self._db.get_links_for_contact(contact.id)
             for name, adapter in self._adapters.items():
                 if name in errors:
@@ -296,14 +318,24 @@ class SyncEngine:
                         # Record the etag our write produced so the echo of this
                         # create on the next pull is recognized and suppressed.
                         self._db.set_link_etag(name, provider_id, etag)
+                        pushed_any = True
                     elif contact.id in dirty_ids:
                         # Already linked AND changed this run: propagate.
                         etag = adapter.update(links[name], contact)
                         # Record the etag our write produced so the echo of this
                         # update on the next pull is recognized and suppressed.
                         self._db.set_link_etag(name, links[name], etag)
+                        pushed_any = True
                     # else: already linked and unchanged this run -> skip; no
                     # network call needed.
+                except ProviderItemRejectedError as exc:
+                    # The provider refused this one contact's data (e.g. photo
+                    # still too large). Log and move on - the rest of this
+                    # provider's contacts must still sync.
+                    rejected += 1
+                    logger.info(
+                        f"PUSH-REJECTED contact_id={contact.id} provider={name} ({exc})"
+                    )
                 except ProviderResourceGoneError as exc:
                     # The resource we hold a link to no longer exists on the
                     # provider (deduped/deleted server-side). Drop just this
@@ -318,3 +350,9 @@ class SyncEngine:
                     )
                 except Exception as exc:
                     errors[name] = str(exc)
+            if pushed_any:
+                # Adapters may record push bookkeeping on the contact (e.g.
+                # icloud_pushed_photo_sha in `extra`); persist it so the next
+                # pull's merge can recognize our own write coming back.
+                self._db.update_contact(contact)
+        return rejected

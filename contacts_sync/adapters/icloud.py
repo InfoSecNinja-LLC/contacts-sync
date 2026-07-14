@@ -15,6 +15,8 @@ stdlib XML parsers are vulnerable to XXE and billion-laughs attacks by
 default. Do not change this back to stdlib XML.
 """
 
+import hashlib
+import io
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -25,6 +27,7 @@ import vobject
 from contacts_sync.adapters.base import (
     ChangeSet,
     ChangedContact,
+    ProviderItemRejectedError,
     ProviderResourceGoneError,
     SyncTokenExpiredError,
 )
@@ -32,6 +35,19 @@ from contacts_sync.http_retry import request_with_retry
 from contacts_sync.models import CanonicalContact, Email, Phone
 
 BASE_URL = "https://contacts.icloud.com"
+
+# Apple's CardDAV server rejects a vCard PUT outright (403 Forbidden) when the
+# embedded PHOTO is too large - observed live: a 283KB photo is refused while
+# 124KB goes through (Apple's documented contact-photo ceiling is ~224KB).
+# Photos above this limit are recompressed/downscaled to fit BEFORE the PUT,
+# for iCloud only - the canonical store and the other providers keep the
+# original full-resolution bytes.
+MAX_PHOTO_BYTES = 190_000
+
+# Statuses that mean "this vCard's data was refused" rather than "the
+# provider is broken": surfaced as ProviderItemRejectedError so the engine
+# skips just this contact instead of aborting the whole iCloud push.
+_ITEM_REJECTED_STATUSES = (400, 403, 413)
 NS = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:carddav"}
 
 SYNC_COLLECTION_BODY = """<?xml version="1.0" encoding="utf-8" ?>
@@ -139,6 +155,10 @@ class ICloudAdapter:
                 "If-None-Match": '"*"',
             },
         )
+        if response.status_code in _ITEM_REJECTED_STATUSES:
+            raise ProviderItemRejectedError(
+                f"iCloud rejected create of {href}: HTTP {response.status_code}"
+            )
         response.raise_for_status()
         return href, response.headers.get("ETag")
 
@@ -154,6 +174,10 @@ class ICloudAdapter:
         if response.status_code == 404:
             raise ProviderResourceGoneError(
                 f"iCloud resource {provider_id} not found (404) - link is stale"
+            )
+        if response.status_code in _ITEM_REJECTED_STATUSES:
+            raise ProviderItemRejectedError(
+                f"iCloud rejected update of {provider_id}: HTTP {response.status_code}"
             )
         response.raise_for_status()
         return response.headers.get("ETag")
@@ -344,6 +368,30 @@ def _discover_addressbook_collection(home_set_url: str, auth) -> str:
     return urljoin(home_set_url, preferred)
 
 
+def _shrink_photo(photo_data: bytes) -> bytes:
+    """Downscale/recompress a photo to fit under MAX_PHOTO_BYTES.
+
+    Tries progressively smaller bounding boxes until the JPEG fits. Returns
+    the smallest attempt even if it somehow still exceeds the limit (the PUT
+    will then be rejected and surfaced as ProviderItemRejectedError rather
+    than looping forever here).
+    """
+    from PIL import Image  # deferred import: only oversized photos need it
+
+    image = Image.open(io.BytesIO(photo_data)).convert("RGB")
+    buffer = io.BytesIO()
+    size = 1024
+    while size >= 128:
+        scaled = image.copy()
+        scaled.thumbnail((size, size))
+        buffer = io.BytesIO()
+        scaled.save(buffer, "JPEG", quality=85)
+        if buffer.tell() <= MAX_PHOTO_BYTES:
+            break
+        size //= 2
+    return buffer.getvalue()
+
+
 def _content_type_to_vcard_type(content_type) -> str:
     if not content_type:
         return "JPEG"
@@ -399,8 +447,17 @@ def _to_vcard(contact: CanonicalContact):
     if contact.notes:
         vcard.add("note").value = contact.notes
     if contact.photo_data:
+        photo_data = contact.photo_data
+        content_type = contact.photo_content_type
+        if len(photo_data) > MAX_PHOTO_BYTES:
+            photo_data = _shrink_photo(photo_data)
+            content_type = "image/jpeg"
+        # Record what we actually sent to iCloud so the engine can recognize
+        # this (possibly shrunk) photo when it comes back on the next pull
+        # and NOT let it replace the full-resolution canonical copy.
+        contact.extra["icloud_pushed_photo_sha"] = hashlib.sha256(photo_data).hexdigest()
         photo = vcard.add("photo")
-        photo.value = contact.photo_data
+        photo.value = photo_data
         photo.encoding_param = "b"
-        photo.type_param = _content_type_to_vcard_type(contact.photo_content_type)
+        photo.type_param = _content_type_to_vcard_type(content_type)
     return vcard

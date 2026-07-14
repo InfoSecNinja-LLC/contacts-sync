@@ -8,6 +8,14 @@ class SyncTokenExpiredError(Exception):
     pass
 
 
+class ProviderItemRejectedError(Exception):
+    """The provider rejected THIS item's data (e.g. iCloud returning 403 for
+    a vCard whose embedded photo exceeds Apple's size ceiling). This is a
+    per-contact data problem, not a provider-wide failure: the engine logs
+    it and continues pushing the remaining contacts instead of aborting the
+    provider."""
+
+
 class ProviderResourceGoneError(Exception):
     """Raised by an adapter when a provider resource we hold a link to no longer
     exists (HTTP 404 on update). Signals the sync engine to drop the stale link
