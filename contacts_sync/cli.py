@@ -4,6 +4,7 @@ import typer
 from dotenv import load_dotenv
 
 from contacts_sync.db import Database
+from contacts_sync.paths import app_dir
 from contacts_sync.sync_engine import SyncEngine
 from contacts_sync.auth import google_auth, microsoft_auth, icloud_auth
 from contacts_sync.adapters.google import GoogleAdapter
@@ -15,18 +16,18 @@ def _configure_logging():
     logger = logging.getLogger("contacts_sync.sync")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
-        handler = logging.FileHandler("sync.log", encoding="utf-8")
+        handler = logging.FileHandler(app_dir() / "sync.log", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         logger.addHandler(handler)
 
 
-load_dotenv()
+load_dotenv(app_dir() / ".env")
 
 app = typer.Typer()
 auth_app = typer.Typer()
 app.add_typer(auth_app, name="auth")
 
-DB_PATH = "contacts.db"
+DB_PATH = str(app_dir() / "contacts.db")
 
 
 @app.callback()

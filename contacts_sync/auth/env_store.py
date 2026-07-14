@@ -6,11 +6,11 @@ upsert a key/value pair into it. It has no knowledge of which provider
 provider's own auth module, which calls into this one.
 """
 
-from pathlib import Path
-
 from dotenv import dotenv_values, set_key
 
-ENV_PATH = Path(".env")
+from contacts_sync.paths import app_dir
+
+ENV_PATH = app_dir() / ".env"
 
 
 class EnvStoreError(RuntimeError):

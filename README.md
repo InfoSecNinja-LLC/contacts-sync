@@ -38,6 +38,17 @@ contacts-sync version                                    # print the installed v
 
 Set `MICROSOFT_CLIENT_ID` in your environment to avoid passing `--microsoft-client-id` every time (it's read as the option's envvar, so `--microsoft-client-id` can be omitted once it's set).
 
+## Standalone Windows build
+
+`dist/contacts-sync/contacts-sync.exe` is a fully standalone build — no Python/venv install needed to run it, just the folder. Build it once from a dev machine with `.venv` set up:
+
+```
+pip install -e ".[dev,build]"
+./build.ps1
+```
+
+This runs `pyinstaller contacts-sync.spec`, producing `dist/contacts-sync/`. Copy that whole folder anywhere; `.env`/`contacts.db`/`sync.log` are created next to the exe (resolved relative to the exe's own location, not whatever directory you launch it from), so the folder is portable. Add `dist/contacts-sync` to your `PATH` to call it from anywhere as `contacts-sync`.
+
 ## Known limitations
 
 - **Google and iCloud credentials are checked eagerly before a sync starts** — if either hasn't been set up yet (`contacts-sync auth <provider>` not run), `sync` fails immediately with an error like `No Google credentials found. Run 'contacts-sync auth google' first.`, even if you only care about syncing the other two right now. This is documented, deliberate v1 behavior, not a bug. **Microsoft credentials are checked lazily instead**: a missing/invalid Microsoft credential is not caught up front, so `sync` still runs and syncs Google/iCloud successfully, reporting the Microsoft failure separately in the summary — the same per-provider isolation used for other mid-sync failures (e.g. an expired token, a network error). Run `contacts-sync doctor` to check all three providers' credentials up front without running a real sync.

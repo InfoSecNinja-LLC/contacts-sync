@@ -14,6 +14,11 @@ from contacts_sync.adapters.base import (
 from contacts_sync.models import CanonicalContact, Email, Phone
 
 PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies,photos"
+# updateContact's updatePersonFields mask rejects "photos" - Google's API
+# returns 400 "Invalid updatePersonFields mask path: photos" since a contact's
+# photo isn't settable via updateContact at all, only via the separate
+# updateContactPhoto call (already used below for pushing photo_data).
+UPDATE_PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies"
 
 
 class GoogleAdapter:
@@ -88,7 +93,7 @@ class GoogleAdapter:
             body["etag"] = etag
         try:
             response = self._service.people().updateContact(
-                resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
+                resourceName=provider_id, updatePersonFields=UPDATE_PERSON_FIELDS, body=body
             ).execute(num_retries=5)
         except HttpError as exc:
             if _is_not_found(exc):
@@ -106,7 +111,7 @@ class GoogleAdapter:
             )
             body["etag"] = fresh_person["etag"]
             response = self._service.people().updateContact(
-                resourceName=provider_id, updatePersonFields=PERSON_FIELDS, body=body
+                resourceName=provider_id, updatePersonFields=UPDATE_PERSON_FIELDS, body=body
             ).execute(num_retries=5)
         if contact.photo_data:
             self._service.people().updateContactPhoto(
