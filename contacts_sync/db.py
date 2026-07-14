@@ -214,6 +214,20 @@ class Database:
             ).fetchone()
             return row["sync_token"] if row else None
 
+    def reset_sync_state(self) -> None:
+        """Clear all provider sync tokens AND per-link etags, forcing the next
+        sync to re-pull and re-merge every contact from every provider.
+
+        Clearing only the sync tokens is NOT enough for a true full resync:
+        the per-link etags would still mark every re-pulled resource as an
+        "echo" and skip its merge, so fields the puller learned to extract
+        after the last sync (e.g. photos added in a later version) would
+        never be backfilled. Both must be cleared together.
+        """
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sync_state")
+            conn.execute("UPDATE provider_links SET etag = NULL")
+
     def set_sync_token(self, provider: str, token: Optional[str]) -> None:
         with self._connect() as conn:
             conn.execute(

@@ -139,3 +139,21 @@ def test_pending_match_roundtrip(db):
     assert pending[0]["provider"] == "google"
     db.delete_pending_match(pending[0]["id"])
     assert db.list_pending_matches() == []
+
+
+def test_reset_sync_state_clears_tokens_and_link_etags(tmp_path):
+    from contacts_sync.models import CanonicalContact
+
+    database = Database(str(tmp_path / "contacts.db"))
+    database.migrate()
+    contact_id = database.create_contact(CanonicalContact(display_name="Jane"))
+    database.link_provider(contact_id, "google", "g-1")
+    database.set_link_etag("google", "g-1", "etag-1")
+    database.set_sync_token("google", "token-1")
+
+    database.reset_sync_state()
+
+    assert database.get_sync_token("google") is None
+    assert database.get_link_etag("google", "g-1") is None
+    # Links themselves survive - only the sync bookkeeping is cleared.
+    assert database.get_link("google", "g-1") == contact_id

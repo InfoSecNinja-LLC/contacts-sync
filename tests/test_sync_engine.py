@@ -675,3 +675,183 @@ def test_no_incoming_photo_keeps_existing_photo(db):
     updated_contact = db.get_contact(existing_id)
     assert updated_contact.photo_data == b"existing-bytes"
     assert updated_contact.photo_content_type == "image/jpeg"
+
+
+def test_first_time_match_with_etag_still_merges_incoming_data(db):
+    """Regression: a change that first-time-matches an existing contact must be
+    merged even though its etag gets recorded during linking. The old code
+    stored the etag, then read it back in the echo-suppression check and
+    skipped the merge - silently dropping the second provider's structured
+    name and photo on initial sync (real adapters always send etags; only
+    etag-less test fakes masked this)."""
+    existing_id = db.create_contact(
+        CanonicalContact(
+            display_name="Pallavi Sharma",
+            given_name="Pallavi Sharma",
+            family_name=None,
+            emails=[Email(value="pallavi@e.com")],
+        )
+    )
+    db.link_provider(existing_id, "google", "g-1")
+
+    incoming = ChangedContact(
+        provider_id="ms-1",
+        contact=CanonicalContact(
+            display_name="Pallavi Sharma",
+            given_name="Pallavi",
+            family_name="Sharma",
+            emails=[Email(value="pallavi@e.com")],
+            photo_data=b"jpeg-bytes",
+            photo_content_type="image/jpeg",
+        ),
+        updated_at="2026-01-02T00:00:00Z",
+        etag='W/"ms-etag-1"',  # crucial: real adapters always populate this
+    )
+    google = FakeAdapter("google")
+    microsoft = FakeAdapter("microsoft", changes=[incoming])
+    engine = SyncEngine(db, {"google": google, "microsoft": microsoft})
+
+    result = engine.run()
+
+    merged = db.get_contact(existing_id)
+    assert merged.given_name == "Pallavi"
+    assert merged.family_name == "Sharma"
+    assert merged.photo_data == b"jpeg-bytes"
+    assert result.updated == 1
+    # And the etag recorded at link time still suppresses the echo next run.
+    engine2 = SyncEngine(db, {"google": FakeAdapter("google"), "microsoft": FakeAdapter("microsoft", changes=[incoming])})
+    result2 = engine2.run()
+    assert result2.updated == 0
+
+
+def test_progress_events_are_emitted_in_order(db):
+    events = []
+
+    def record(event, **kwargs):
+        events.append((event, kwargs))
+
+    incoming = ChangedContact(
+        provider_id="g-1",
+        contact=CanonicalContact(display_name="Jane", emails=[Email(value="jane@e.com")]),
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    google = FakeAdapter("google", changes=[incoming])
+    microsoft = FakeAdapter("microsoft")
+
+    SyncEngine(db, {"google": google, "microsoft": microsoft}, progress=record).run()
+
+    assert [name for name, _ in events] == [
+        "pull_start",   # google
+        "pull_done",
+        "change_done",
+        "pull_start",   # microsoft
+        "pull_done",
+        "push_start",
+        "push_advance",
+    ]
+    assert events[1][1] == {"provider": "google", "total": 1}
+    assert events[4][1] == {"provider": "microsoft", "total": 0}
+    assert events[5][1] == {"total": 1}
+
+
+def test_progress_reports_provider_error(db):
+    events = []
+
+    def record(event, **kwargs):
+        events.append((event, kwargs))
+
+    class ExplodingAdapter:
+        name = "google"
+
+        def list_changes(self, since_token):
+            raise ValueError("boom")
+
+    SyncEngine(db, {"google": ExplodingAdapter()}, progress=record).run()
+
+    assert ("provider_error", {"provider": "google"}) in events
+
+
+def test_default_progress_is_noop(db):
+    # No progress argument: run() must work exactly as before.
+    google = FakeAdapter("google")
+    result = SyncEngine(db, {"google": google}).run()
+    assert result.provider_errors == {}
+
+
+def test_pushed_photo_echo_does_not_replace_canonical_photo(db):
+    """A pull returning the exact bytes we last pushed to that provider (e.g.
+    a photo shrunk to fit iCloud's size limit) must not replace the
+    full-resolution canonical photo."""
+    import hashlib
+
+    full_res = b"full-resolution-bytes" * 1000
+    shrunk = b"shrunk-for-icloud"
+    existing_id = db.create_contact(
+        CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com")],
+            photo_data=full_res,
+            photo_content_type="image/jpeg",
+            extra={"icloud_pushed_photo_sha": hashlib.sha256(shrunk).hexdigest()},
+        )
+    )
+    db.link_provider(existing_id, "icloud", "i-1")
+
+    incoming = ChangedContact(
+        provider_id="i-1",
+        contact=CanonicalContact(
+            display_name="Jane",
+            emails=[Email(value="jane@e.com")],
+            photo_data=shrunk,
+            photo_content_type="image/jpeg",
+        ),
+        updated_at="",
+        etag='"new-etag"',
+    )
+    engine = SyncEngine(db, {"icloud": FakeAdapter("icloud", changes=[incoming])})
+
+    result = engine.run()
+
+    merged = db.get_contact(existing_id)
+    assert merged.photo_data == full_res
+    assert result.updated == 0  # echo recognized: nothing changed, nothing re-pushed
+
+
+def test_item_rejected_push_is_logged_and_does_not_abort_provider(db):
+    from contacts_sync.adapters.base import ProviderItemRejectedError
+
+    db.create_contact(CanonicalContact(display_name="Rejected", emails=[Email(value="r@e.com")]))
+    db.create_contact(CanonicalContact(display_name="Fine", emails=[Email(value="f@e.com")]))
+
+    class RejectsFirstAdapter(FakeAdapter):
+        def create(self, contact):
+            if contact.display_name == "Rejected":
+                raise ProviderItemRejectedError("photo too large")
+            return super().create(contact)
+
+    adapter = RejectsFirstAdapter("icloud")
+    engine = SyncEngine(db, {"icloud": adapter})
+
+    result = engine.run()
+
+    # The rejected contact was skipped, the other still got created,
+    # and the provider is NOT marked errored.
+    assert result.rejected == 1
+    assert [c.display_name for c in adapter.created] == ["Fine"]
+    assert result.provider_errors == {}
+
+
+def test_push_persists_adapter_recorded_extra(db):
+    """Adapters may record bookkeeping (e.g. the sha of a shrunk photo) on
+    contact.extra during create/update; the engine must persist it."""
+    contact_id = db.create_contact(CanonicalContact(display_name="Jane", emails=[Email(value="j@e.com")]))
+
+    class RecordingAdapter(FakeAdapter):
+        def create(self, contact):
+            contact.extra["icloud_pushed_photo_sha"] = "abc123"
+            return super().create(contact)
+
+    engine = SyncEngine(db, {"icloud": RecordingAdapter("icloud")})
+    engine.run()
+
+    assert db.get_contact(contact_id).extra.get("icloud_pushed_photo_sha") == "abc123"

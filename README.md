@@ -31,6 +31,10 @@ You need to complete `auth` for **all three** providers before `sync` will do an
 contacts-sync doctor                                    # check all three providers are reachable
 contacts-sync sync --dry-run --microsoft-client-id X     # preview changes without writing
 contacts-sync sync --microsoft-client-id X               # run a real sync
+contacts-sync sync --full --microsoft-client-id X        # full re-pull + re-merge (clears sync tokens/etags)
+contacts-sync fix-names                                  # preview split of "full name stuck in first-name field"
+contacts-sync fix-names --apply                          # write those splits locally and push to all providers
+contacts-sync push --all                                 # force-push every local contact to every provider
 contacts-sync review                                     # resolve ambiguous first-time matches
 contacts-sync status                                     # see contact counts and sync token state
 contacts-sync version                                    # print the installed version
@@ -48,6 +52,19 @@ pip install -e ".[dev,build]"
 ```
 
 This runs `pyinstaller contacts-sync.spec`, producing `dist/contacts-sync/`. Copy that whole folder anywhere; `.env`/`contacts.db`/`sync.log` are created next to the exe (resolved relative to the exe's own location, not whatever directory you launch it from), so the folder is portable. Add `dist/contacts-sync` to your `PATH` to call it from anywhere as `contacts-sync`.
+
+## Repairing data from syncs run before v0.2.0
+
+Syncs run with earlier versions had a bug that silently dropped the second
+provider's data (structured first/last names, photos, extra emails) when a
+contact was matched across providers for the first time. If your contacts
+show the full name in the first-name field or are missing photos, run:
+
+```
+contacts-sync sync --full --microsoft-client-id X   # re-pull everything; backfills photos and any provider-side data
+contacts-sync fix-names                              # preview name splits for whatever is still unsplit
+contacts-sync fix-names --apply                      # apply and push the splits
+```
 
 ## Known limitations
 

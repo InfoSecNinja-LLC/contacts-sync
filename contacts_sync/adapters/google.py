@@ -1,4 +1,5 @@
 import base64
+import re
 from typing import Optional
 
 import requests
@@ -134,6 +135,18 @@ def _is_not_found(exc: HttpError) -> bool:
     return status == 404
 
 
+# Google People photo URLs end in a size directive (e.g. "=s100"), which
+# serves a 100px thumbnail. Pulling that would permanently degrade every
+# synced photo, since the thumbnail is what gets pushed to the other
+# providers. Rewriting the directive to "=s0" requests the original size.
+# URLs without a recognizable suffix are used unchanged.
+_PHOTO_SIZE_SUFFIX = re.compile(r"=s\d+(-c)?$")
+
+
+def _full_size_photo_url(url: str) -> str:
+    return _PHOTO_SIZE_SUFFIX.sub("=s0", url)
+
+
 def _to_canonical(person: dict, access_token: Optional[str] = None) -> CanonicalContact:
     names = person.get("names", [{}])[0] if person.get("names") else {}
     emails = [Email(value=e["value"]) for e in person.get("emailAddresses", [])]
@@ -145,7 +158,8 @@ def _to_canonical(person: dict, access_token: Optional[str] = None) -> Canonical
     if non_default_photos and access_token:
         try:
             response = requests.get(
-                non_default_photos[0]["url"], headers={"Authorization": f"Bearer {access_token}"}
+                _full_size_photo_url(non_default_photos[0]["url"]),
+                headers={"Authorization": f"Bearer {access_token}"},
             )
             response.raise_for_status()
             photo_data = response.content
