@@ -190,3 +190,82 @@ def test_push_without_all_is_a_noop(mocker, tmp_path):
 
     assert result.exit_code == 0
     build_adapters.assert_not_called()
+
+
+def _seed_photo_contact(mocker, tmp_path, photo=b"wrong-photo"):
+    from contacts_sync.db import Database
+    from contacts_sync.models import CanonicalContact
+
+    db_path = str(tmp_path / "contacts.db")
+    mocker.patch("contacts_sync.cli.DB_PATH", db_path)
+    database = Database(db_path)
+    database.migrate()
+    contact_id = database.create_contact(
+        CanonicalContact(display_name="Meeta Shah", photo_data=photo, photo_content_type="image/jpeg")
+    )
+    database.link_provider(contact_id, "google", "people/g-1")
+    database.link_provider(contact_id, "microsoft", "ms-1")
+    database.link_provider(contact_id, "icloud", "i-1")
+    return database, contact_id
+
+
+def _google_adapter_mock(mocker):
+    google = mocker.Mock()
+    google.fetch_contact_photo_urls.return_value = {"people/g-1": "https://p/contact=s100"}
+    google.download_photo.return_value = (b"correct-photo", "image/jpeg")
+    return google
+
+
+def test_fix_photos_preview_reports_but_writes_nothing(mocker, tmp_path):
+    database, contact_id = _seed_photo_contact(mocker, tmp_path)
+    google = _google_adapter_mock(mocker)
+    mocker.patch("contacts_sync.cli.GoogleAdapter", return_value=google)
+    mocker.patch("contacts_sync.cli.google_auth.get_credentials")
+    build_adapters = mocker.patch("contacts_sync.cli._build_adapters")
+
+    result = runner.invoke(app, ["fix-photos"])
+
+    assert result.exit_code == 0
+    assert "Meeta Shah" in result.stdout
+    assert "Preview only" in result.stdout
+    build_adapters.assert_not_called()
+    assert database.get_contact(contact_id).photo_data == b"wrong-photo"
+
+
+def test_fix_photos_apply_repairs_stamps_and_pushes_to_ms_and_icloud_only(mocker, tmp_path):
+    import hashlib
+
+    database, contact_id = _seed_photo_contact(mocker, tmp_path)
+    google = _google_adapter_mock(mocker)
+    microsoft = mocker.Mock()
+    microsoft.update.return_value = "ms-etag"
+    icloud = mocker.Mock()
+    icloud.update.return_value = "i-etag"
+    mocker.patch(
+        "contacts_sync.cli._build_adapters",
+        return_value={"google": google, "microsoft": microsoft, "icloud": icloud},
+    )
+
+    result = runner.invoke(app, ["fix-photos", "--apply"])
+
+    assert result.exit_code == 0
+    contact = database.get_contact(contact_id)
+    assert contact.photo_data == b"correct-photo"
+    assert contact.field_meta["photo"]  # stamped as newest edit
+    assert contact.extra["google_pushed_photo_sha"] == hashlib.sha256(b"correct-photo").hexdigest()
+    microsoft.update.assert_called_once()
+    icloud.update.assert_called_once()
+    google.update.assert_not_called()  # google already has this photo
+    google.create.assert_not_called()
+
+
+def test_fix_photos_skips_contacts_matching_google(mocker, tmp_path):
+    database, contact_id = _seed_photo_contact(mocker, tmp_path, photo=b"correct-photo")
+    google = _google_adapter_mock(mocker)
+    mocker.patch("contacts_sync.cli.GoogleAdapter", return_value=google)
+    mocker.patch("contacts_sync.cli.google_auth.get_credentials")
+
+    result = runner.invoke(app, ["fix-photos"])
+
+    assert result.exit_code == 0
+    assert "already match" in result.stdout

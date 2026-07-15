@@ -855,3 +855,36 @@ def test_push_persists_adapter_recorded_extra(db):
     engine.run()
 
     assert db.get_contact(contact_id).extra.get("icloud_pushed_photo_sha") == "abc123"
+
+
+def test_untimestamped_photo_pulled_later_cannot_replace_existing(db):
+    """Regression for the wrong-photo bug: with no timestamps on either side,
+    the provider that happens to be pulled later must NOT overwrite a photo
+    already merged from an earlier provider."""
+    existing_id = db.create_contact(
+        CanonicalContact(
+            display_name="Meeta Shah",
+            emails=[Email(value="meeta@e.com")],
+            photo_data=b"correct-google-photo",
+            photo_content_type="image/jpeg",
+            field_meta={"photo": ""},  # merged earlier with unknown timestamp
+        )
+    )
+    db.link_provider(existing_id, "icloud", "i-1")
+
+    incoming = ChangedContact(
+        provider_id="i-1",
+        contact=CanonicalContact(
+            display_name="Meeta Shah",
+            emails=[Email(value="meeta@e.com")],
+            photo_data=b"wrong-person-photo",
+            photo_content_type="image/jpeg",
+        ),
+        updated_at="",  # unknown recency
+        etag='"i-etag"',
+    )
+    engine = SyncEngine(db, {"icloud": FakeAdapter("icloud", changes=[incoming])})
+
+    engine.run()
+
+    assert db.get_contact(existing_id).photo_data == b"correct-google-photo"

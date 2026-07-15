@@ -101,7 +101,7 @@ def main():
 
 @app.command()
 def version():
-    typer.echo("contacts-sync 0.2.1")
+    typer.echo("contacts-sync 0.2.2")
 
 
 @auth_app.command("google")
@@ -250,6 +250,115 @@ def fix_names(
             typer.echo(f"ERROR [{provider}]: {error}")
         typer.echo(
             "The failed provider(s) still hold the old names. After fixing the "
+            "error, run 'contacts-sync push --all' to bring them up to date."
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command("fix-photos")
+def fix_photos(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Write the repaired photos to the local store and push them to "
+        "Microsoft and iCloud. Without this flag only a preview is printed.",
+    ),
+    microsoft_client_id: str = typer.Option(None, envvar="MICROSOFT_CLIENT_ID"),
+):
+    """Repair contact photos from the USER-SET photo on Google.
+
+    Earlier versions could store a PROFILE-sourced photo (the avatar of
+    whatever Google account got linked to an email/phone - sometimes a
+    completely different person) and let pull order decide merge ties, so
+    some contacts ended up with the wrong picture everywhere. This re-fetches
+    each contact's user-set (CONTACT-sourced) Google photo, replaces the
+    stored photo where it differs, stamps the repair so older provider copies
+    can't overwrite it, and pushes the fix to Microsoft and iCloud. Contacts
+    with no user-set Google photo are left untouched. Safe to re-run.
+    """
+    import hashlib
+
+    _configure_logging()
+    db = Database(DB_PATH)
+    db.migrate()
+    # Preview only needs Google; --apply needs everything, and building all
+    # adapters BEFORE any DB write means a credential problem aborts cleanly.
+    if apply:
+        try:
+            adapters = _build_adapters(microsoft_client_id)
+        except RuntimeError as exc:
+            typer.echo(f"ERROR: {exc}")
+            typer.echo("Nothing was changed. Fix the credential problem and re-run.")
+            raise typer.Exit(code=1)
+        google_adapter = adapters["google"]
+    else:
+        try:
+            google_adapter = GoogleAdapter(google_auth.get_credentials())
+        except RuntimeError as exc:
+            typer.echo(f"ERROR: {exc}")
+            raise typer.Exit(code=1)
+
+    contacts = db.list_contacts()
+    google_ids = {}
+    for contact in contacts:
+        links = db.get_links_for_contact(contact.id)
+        if "google" in links:
+            google_ids[contact.id] = links["google"]
+
+    typer.echo(f"Checking user-set Google photos for {len(google_ids)} linked contact(s)...")
+    photo_urls = google_adapter.fetch_contact_photo_urls(list(google_ids.values()))
+
+    candidates = []
+    with _progress_display() as progress:
+        task = progress.add_task("Comparing photos", total=len(google_ids))
+        for contact in contacts:
+            progress.advance(task)
+            provider_id = google_ids.get(contact.id)
+            if provider_id is None or provider_id not in photo_urls:
+                continue
+            photo_data, content_type = google_adapter.download_photo(photo_urls[provider_id])
+            if contact.photo_data == photo_data:
+                continue
+            candidates.append((contact, photo_data, content_type))
+
+    if not candidates:
+        typer.echo("All stored photos already match the user-set Google photos.")
+        return
+    for contact, photo_data, _ in candidates:
+        stored = f"{len(contact.photo_data)} bytes" if contact.photo_data else "none"
+        typer.echo(f"[{contact.id}] {contact.display_name}: stored photo {stored} -> Google's {len(photo_data)} bytes")
+    typer.echo(f"{len(candidates)} contact photo(s) to repair.")
+    if not apply:
+        typer.echo("Preview only - re-run with --apply to write these repairs and push them out.")
+        return
+
+    logger = logging.getLogger("contacts_sync.sync")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    dirty_ids = set()
+    for contact, photo_data, content_type in candidates:
+        contact.photo_data = photo_data
+        contact.photo_content_type = content_type
+        # Stamp the repair as the newest edit AND pre-record its sha as
+        # "already pushed to google" (it came FROM google), so neither an
+        # older provider copy nor google's own echo can undo it.
+        contact.field_meta["photo"] = now
+        contact.extra["google_pushed_photo_sha"] = hashlib.sha256(photo_data).hexdigest()
+        db.update_contact(contact)
+        dirty_ids.add(contact.id)
+        logger.info(f'FIX-PHOTOS contact_id={contact.id} display_name="{contact.display_name}"')
+
+    # Push to Microsoft and iCloud only - Google already holds this exact
+    # photo, so pushing it back would just churn etags and re-encodes.
+    push_adapters = {name: a for name, a in adapters.items() if name != "google"}
+    with _progress_display() as progress:
+        engine = SyncEngine(db, push_adapters, progress=_ProgressReporter(progress))
+        errors = engine.push_contacts(dirty_ids)
+    typer.echo(f"Repaired and pushed {len(dirty_ids)} photo(s).")
+    if errors:
+        for provider, error in errors.items():
+            typer.echo(f"ERROR [{provider}]: {error}")
+        typer.echo(
+            "The failed provider(s) still hold the old photos. After fixing the "
             "error, run 'contacts-sync push --all' to bring them up to date."
         )
         raise typer.Exit(code=1)

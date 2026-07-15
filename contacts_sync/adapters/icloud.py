@@ -17,6 +17,7 @@ default. Do not change this back to stdlib XML.
 
 import hashlib
 import io
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -130,7 +131,12 @@ class ICloudAdapter:
                 continue
             vcard = vobject.readOne(address_data)
             changes.append(
-                ChangedContact(provider_id=href, contact=_to_canonical(vcard), updated_at="", etag=etag or None)
+                ChangedContact(
+                    provider_id=href,
+                    contact=_to_canonical(vcard),
+                    updated_at=_rev_to_iso(vcard),
+                    etag=etag or None,
+                )
             )
 
         return ChangeSet(changes=changes, next_sync_token=_extract_sync_token(response.text))
@@ -402,6 +408,24 @@ def _vcard_type_to_content_type(type_param) -> str:
     if not type_param:
         return "image/jpeg"
     return f"image/{type_param.lower()}"
+
+
+def _rev_to_iso(vcard) -> str:
+    """Normalize a vCard REV (last-modified) to ISO-8601 so it compares
+    correctly against other providers' timestamps in newest-edit-wins
+    merges. vCards write REV either compact ("20240101T000000Z") or ISO
+    ("2024-01-01T00:00:00Z"); compact forms compare WRONG lexicographically
+    against ISO ones, so both are parsed and re-emitted uniformly. Missing
+    or unparseable REV yields "" (unknown)."""
+    if not hasattr(vcard, "rev"):
+        return ""
+    raw = str(vcard.rev.value).strip()
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y-%m-%dT%H:%M:%SZ", "%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            continue
+    return ""
 
 
 def _to_canonical(vcard) -> CanonicalContact:
