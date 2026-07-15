@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import re
 from typing import Optional
 
@@ -14,7 +15,7 @@ from contacts_sync.adapters.base import (
 )
 from contacts_sync.models import CanonicalContact, Email, Phone
 
-PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies,photos"
+PERSON_FIELDS = "names,emailAddresses,phoneNumbers,biographies,photos,metadata"
 # updateContact's updatePersonFields mask rejects "photos" - Google's API
 # returns 400 "Invalid updatePersonFields mask path: photos" since a contact's
 # photo isn't settable via updateContact at all, only via the separate
@@ -54,7 +55,7 @@ class GoogleAdapter:
                         ChangedContact(
                             provider_id=person["resourceName"],
                             contact=_to_canonical(person, self._credentials.token),
-                            updated_at="",
+                            updated_at=_person_updated_at(person),
                             etag=person.get("etag"),
                         )
                     )
@@ -80,6 +81,7 @@ class GoogleAdapter:
                 resourceName=resource_name,
                 body={"photoBytes": base64.b64encode(contact.photo_data).decode()},
             ).execute(num_retries=5)
+            contact.extra["google_pushed_photo_sha"] = hashlib.sha256(contact.photo_data).hexdigest()
         return resource_name, response.get("etag")
 
     def update(self, provider_id: str, contact: CanonicalContact) -> Optional[str]:
@@ -119,10 +121,43 @@ class GoogleAdapter:
                 resourceName=provider_id,
                 body={"photoBytes": base64.b64encode(contact.photo_data).decode()},
             ).execute(num_retries=5)
+            contact.extra["google_pushed_photo_sha"] = hashlib.sha256(contact.photo_data).hexdigest()
         return response.get("etag") if isinstance(response, dict) else None
 
     def delete(self, provider_id: str) -> None:
         self._service.people().deleteContact(resourceName=provider_id).execute(num_retries=5)
+
+    def fetch_contact_photo_urls(self, provider_ids: list) -> dict:
+        """Map provider_id -> URL of the USER-SET (CONTACT-sourced) photo.
+
+        Contacts without a user-set photo are omitted - PROFILE photos are
+        deliberately excluded here because this feeds the fix-photos repair,
+        which must trust nothing but photos the user set themselves. Uses
+        getBatchGet (200 per call) to stay well inside People API quotas.
+        """
+        urls = {}
+        for start in range(0, len(provider_ids), 200):
+            chunk = provider_ids[start:start + 200]
+            response = self._service.people().getBatchGet(
+                resourceNames=chunk, personFields="photos"
+            ).execute(num_retries=5)
+            for item in response.get("responses", []):
+                person = item.get("person") or {}
+                provider_id = item.get("requestedResourceName") or person.get("resourceName")
+                photo = _pick_photo(person.get("photos", []), contact_only=True)
+                if provider_id and photo:
+                    urls[provider_id] = photo["url"]
+        return urls
+
+    def download_photo(self, url: str) -> tuple[bytes, Optional[str]]:
+        """Download a photo URL at original size using the adapter's token."""
+        response = requests.get(
+            _full_size_photo_url(url),
+            headers={"Authorization": f"Bearer {self._credentials.token}"},
+        )
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "").split(";")[0].strip() or None
+        return response.content, content_type
 
 
 def _is_etag_conflict(exc: HttpError) -> bool:
@@ -133,6 +168,43 @@ def _is_etag_conflict(exc: HttpError) -> bool:
 def _is_not_found(exc: HttpError) -> bool:
     status = exc.resp.status if hasattr(exc, "resp") else None
     return status == 404
+
+
+def _pick_photo(photos: list, contact_only: bool = False) -> Optional[dict]:
+    """Choose which of a person's photos to sync.
+
+    A person's `photos` can contain both a CONTACT-sourced photo (set by the
+    user on the contact itself) and a PROFILE-sourced photo (the avatar of
+    whatever Google ACCOUNT Google linked to one of the contact's emails or
+    phone numbers). Profile linkage is fuzzy and account avatars change with
+    their owners - syncing one once attached a completely different person's
+    face to a contact. The user-set CONTACT photo must therefore always win;
+    PROFILE is only a fallback (or skipped entirely with contact_only=True,
+    used by repair flows that should trust nothing but user-set photos).
+    """
+    non_default = [p for p in photos if not p.get("default")]
+    contact_sourced = [
+        p for p in non_default
+        if p.get("metadata", {}).get("source", {}).get("type") == "CONTACT"
+    ]
+    if contact_sourced:
+        return contact_sourced[0]
+    if contact_only:
+        return None
+    return non_default[0] if non_default else None
+
+
+def _person_updated_at(person: dict) -> str:
+    """The CONTACT source's updateTime, so merges have a real timestamp.
+
+    Without this every Google change carried updated_at="" and lost all
+    newest-edit-wins merges against Microsoft's real timestamps (and tied
+    arbitrarily with iCloud's).
+    """
+    for source in person.get("metadata", {}).get("sources", []):
+        if source.get("type") == "CONTACT":
+            return source.get("updateTime", "")
+    return ""
 
 
 # Google People photo URLs end in a size directive (e.g. "=s100"), which
@@ -154,11 +226,11 @@ def _to_canonical(person: dict, access_token: Optional[str] = None) -> Canonical
     notes = person.get("biographies", [{}])[0].get("value") if person.get("biographies") else None
     photo_data = None
     photo_content_type = None
-    non_default_photos = [p for p in person.get("photos", []) if not p.get("default")]
-    if non_default_photos and access_token:
+    picked_photo = _pick_photo(person.get("photos", []))
+    if picked_photo and access_token:
         try:
             response = requests.get(
-                _full_size_photo_url(non_default_photos[0]["url"]),
+                _full_size_photo_url(picked_photo["url"]),
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             response.raise_for_status()

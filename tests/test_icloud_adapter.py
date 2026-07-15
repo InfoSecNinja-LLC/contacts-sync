@@ -965,3 +965,28 @@ def test_create_rejected_status_raises_item_rejected(requests_mock):
 
     with pytest.raises(ProviderItemRejectedError):
         adapter.create(CanonicalContact(id=50, display_name="Jane"))
+
+
+def test_rev_to_iso_normalizes_compact_and_iso_forms():
+    from contacts_sync.adapters.icloud import _rev_to_iso
+
+    def card_with_rev(rev):
+        card = vobject.readOne("BEGIN:VCARD\nVERSION:3.0\nFN:X\nREV:" + rev + "\nEND:VCARD\n")
+        return card
+
+    assert _rev_to_iso(card_with_rev("20240101T000000Z")) == "2024-01-01T00:00:00Z"
+    assert _rev_to_iso(card_with_rev("2024-01-01T00:00:00Z")) == "2024-01-01T00:00:00Z"
+    no_rev = vobject.readOne("BEGIN:VCARD\nVERSION:3.0\nFN:X\nEND:VCARD\n")
+    assert _rev_to_iso(no_rev) == ""
+
+
+def test_list_changes_populates_updated_at_from_rev(requests_mock):
+    response_with_rev = SYNC_RESPONSE.replace(
+        "TEL:+15551234567", "TEL:+15551234567\nREV:20260301T100000Z"
+    )
+    requests_mock.register_uri("REPORT", f"{BASE}{ADDRESSBOOK}", text=response_with_rev, status_code=207)
+    adapter = ICloudAdapter("user@icloud.com", "app-pass", ADDRESSBOOK)
+
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].updated_at == "2026-03-01T10:00:00Z"

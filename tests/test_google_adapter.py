@@ -497,3 +497,37 @@ def test_list_changes_requests_original_size_photo(mocker):
         "https://lh3.googleusercontent.com/abc123=s0",
         headers={"Authorization": "Bearer fake-token"},
     )
+
+
+def test_pick_photo_prefers_contact_source_over_profile():
+    from contacts_sync.adapters.google import _pick_photo
+
+    photos = [
+        {"url": "https://p/profile", "metadata": {"source": {"type": "PROFILE"}}},
+        {"url": "https://p/contact", "metadata": {"source": {"type": "CONTACT"}}},
+    ]
+    assert _pick_photo(photos)["url"] == "https://p/contact"
+    # contact_only mode never falls back to a PROFILE photo.
+    assert _pick_photo([photos[0]], contact_only=True) is None
+    # ...but normal mode does, so contacts with only a profile photo keep it.
+    assert _pick_photo([photos[0]])["url"] == "https://p/profile"
+    # default photos (monogram placeholders) are never picked.
+    assert _pick_photo([{"url": "https://p/x", "default": True}]) is None
+
+
+def test_list_changes_uses_contact_source_update_time(mocker):
+    person = {
+        "resourceName": "people/1", "etag": "e1",
+        "names": [{"displayName": "Jane"}],
+        "metadata": {"sources": [
+            {"type": "PROFILE", "id": "x"},
+            {"type": "CONTACT", "id": "y", "updateTime": "2026-03-01T10:00:00.000Z"},
+        ]},
+    }
+    service = _fake_service(mocker, {"connections": [person], "nextSyncToken": "sync-2"})
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+
+    adapter = GoogleAdapter(credentials=mocker.Mock(token="fake-token"))
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].updated_at == "2026-03-01T10:00:00.000Z"

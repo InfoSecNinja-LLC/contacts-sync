@@ -7,6 +7,7 @@ callable (see `contacts_sync.auth.microsoft_auth.get_token_provider`) and
 calls it to get a fresh bearer token per request.
 """
 
+import hashlib
 from typing import Optional
 
 import requests
@@ -111,6 +112,10 @@ class MicrosoftAdapter:
         request_with_retry(
             "PUT", f"{GRAPH_BASE}/me/contacts/{contact_id}/photo/$value", headers=headers, data=contact.photo_data
         )
+        # Record what we sent so the engine can recognize this photo coming
+        # back on the next delta pull (Graph bumps lastModifiedDateTime for
+        # our own writes, which would otherwise let the echo win the merge).
+        contact.extra["microsoft_pushed_photo_sha"] = hashlib.sha256(contact.photo_data).hexdigest()
 
     def delete(self, provider_id: str) -> None:
         response = request_with_retry("DELETE", f"{GRAPH_BASE}/me/contacts/{provider_id}", headers=self._headers())

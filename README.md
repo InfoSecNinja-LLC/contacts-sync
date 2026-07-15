@@ -34,6 +34,8 @@ contacts-sync sync --microsoft-client-id X               # run a real sync
 contacts-sync sync --full --microsoft-client-id X        # full re-pull + re-merge (clears sync tokens/etags)
 contacts-sync fix-names                                  # preview split of "full name stuck in first-name field"
 contacts-sync fix-names --apply                          # write those splits locally and push to all providers
+contacts-sync fix-photos                                 # preview photo repairs from user-set Google photos
+contacts-sync fix-photos --apply                         # apply photo repairs and push to Microsoft/iCloud
 contacts-sync push --all                                 # force-push every local contact to every provider
 contacts-sync review                                     # resolve ambiguous first-time matches
 contacts-sync status                                     # see contact counts and sync token state
@@ -64,6 +66,8 @@ show the full name in the first-name field or are missing photos, run:
 contacts-sync sync --full --microsoft-client-id X   # re-pull everything; backfills photos and any provider-side data
 contacts-sync fix-names                              # preview name splits for whatever is still unsplit
 contacts-sync fix-names --apply                      # apply and push the splits
+contacts-sync fix-photos                             # preview photo repairs (versions before v0.2.2 could sync a
+contacts-sync fix-photos --apply                     #   wrong-person PROFILE photo; this restores user-set photos)
 ```
 
 ## Known limitations

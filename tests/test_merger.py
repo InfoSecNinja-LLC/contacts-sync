@@ -36,3 +36,26 @@ def test_merge_multi_value_unions_and_dedupes():
 def test_merge_multi_value_empty_incoming_keeps_current():
     result = merge_multi_value(["a@example.com"], [], normalize=normalize_email)
     assert result == ["a@example.com"]
+
+
+def test_equal_timestamps_keep_current_value():
+    # Ties must not let pull order decide the winner.
+    value, meta = merge_single_value("current", "2026-01-01T00:00:00Z", "incoming", "2026-01-01T00:00:00Z")
+    assert value == "current"
+
+
+def test_both_unknown_timestamps_keep_existing_value():
+    # Two providers with no timestamps: whichever was pulled first stays.
+    value, meta = merge_single_value("current", "", "incoming", "")
+    assert value == "current"
+
+
+def test_unknown_current_with_no_value_still_takes_incoming():
+    # Backfill case: nothing stored yet, incoming with unknown timestamp wins.
+    value, meta = merge_single_value(None, None, "incoming", "")
+    assert value == "incoming"
+
+
+def test_real_timestamp_beats_unknown_current():
+    value, meta = merge_single_value("current", "", "incoming", "2026-01-01T00:00:00Z")
+    assert value == "incoming"
