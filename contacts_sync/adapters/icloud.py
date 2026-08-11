@@ -119,8 +119,17 @@ class ICloudAdapter:
 
         changes = []
         for href, status, etag, address_data in _parse_multistatus(response.text):
+            # Per RFC 4918, D:href in a sync-collection REPORT MAY be relative
+            # or absolute - Apple's server has been observed sending relative
+            # paths here even though create()/update()/delete() and the DB's
+            # stored links all use the full absolute URL. Without this
+            # normalization, every lookup keyed on provider_id silently fails
+            # to match its existing link, so pulled deletes/updates are
+            # dropped instead of applied (see discover_addressbook_path's
+            # principal/home-set handling for the same Apple quirk).
+            provider_id = urljoin(self._addressbook_url, href)
             if status.startswith("404"):
-                changes.append(ChangedContact(provider_id=href, contact=None, updated_at="", deleted=True))
+                changes.append(ChangedContact(provider_id=provider_id, contact=None, updated_at="", deleted=True))
                 continue
             if not address_data:
                 # Not a vCard resource — e.g. the addressbook collection's own
@@ -132,7 +141,7 @@ class ICloudAdapter:
             vcard = vobject.readOne(address_data)
             changes.append(
                 ChangedContact(
-                    provider_id=href,
+                    provider_id=provider_id,
                     contact=_to_canonical(vcard),
                     updated_at=_rev_to_iso(vcard),
                     etag=etag or None,
