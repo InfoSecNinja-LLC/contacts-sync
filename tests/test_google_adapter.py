@@ -515,6 +515,37 @@ def test_pick_photo_prefers_contact_source_over_profile():
     assert _pick_photo([{"url": "https://p/x", "default": True}]) is None
 
 
+def test_contact_biography_prefers_contact_source_over_profile():
+    from contacts_sync.adapters.google import _contact_biography
+
+    person = {
+        "biographies": [
+            {"value": "***", "metadata": {"source": {"type": "DOMAIN_PROFILE"}}},
+            {"value": "met at conf", "metadata": {"source": {"type": "CONTACT"}}},
+        ]
+    }
+    assert _contact_biography(person) == "met at conf"
+    # No CONTACT source (e.g. only a directory/profile blurb, sometimes a
+    # redacted "***" placeholder) - never surfaced as notes.
+    assert _contact_biography({"biographies": [person["biographies"][0]]}) is None
+    assert _contact_biography({}) is None
+
+
+def test_list_changes_ignores_non_contact_biography(mocker):
+    person = {
+        "resourceName": "people/1", "etag": "e1",
+        "names": [{"displayName": "Jane"}],
+        "biographies": [{"value": "***", "metadata": {"source": {"type": "DOMAIN_PROFILE"}}}],
+    }
+    service = _fake_service(mocker, {"connections": [person], "nextSyncToken": "sync-2"})
+    mocker.patch("contacts_sync.adapters.google.build", return_value=service)
+
+    adapter = GoogleAdapter(credentials=mocker.Mock())
+    change_set = adapter.list_changes(None)
+
+    assert change_set.changes[0].contact.notes is None
+
+
 def test_list_changes_uses_contact_source_update_time(mocker):
     person = {
         "resourceName": "people/1", "etag": "e1",

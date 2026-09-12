@@ -194,6 +194,27 @@ def _pick_photo(photos: list, contact_only: bool = False) -> Optional[dict]:
     return non_default[0] if non_default else None
 
 
+def _contact_biography(person: dict) -> Optional[str]:
+    """The CONTACT source's biography, so a directory/profile blurb never
+    lands in notes.
+
+    Like `_pick_photo`, `biographies` can hold both a CONTACT-sourced entry
+    (what the user actually typed on the contact) and a DOMAIN_PROFILE/PROFILE
+    entry pulled in from whatever Google/Workspace account happens to link to
+    one of the contact's emails or phone numbers. Many Workspace directory
+    profiles render that entry as a privacy-redacted placeholder - literally
+    "***" - rather than omitting it, and blindly taking biographies[0] let
+    that placeholder silently become (or overwrite) the contact's real notes.
+    Unlike photos there is no useful fallback here: a stranger's profile blurb
+    is never an acceptable substitute for the user's own note, so a missing
+    CONTACT source means no notes at all.
+    """
+    for bio in person.get("biographies", []):
+        if bio.get("metadata", {}).get("source", {}).get("type") == "CONTACT":
+            return bio.get("value")
+    return None
+
+
 def _person_updated_at(person: dict) -> str:
     """The CONTACT source's updateTime, so merges have a real timestamp.
 
@@ -223,7 +244,7 @@ def _to_canonical(person: dict, access_token: Optional[str] = None) -> Canonical
     names = person.get("names", [{}])[0] if person.get("names") else {}
     emails = [Email(value=e["value"]) for e in person.get("emailAddresses", [])]
     phones = [Phone(value=p["value"]) for p in person.get("phoneNumbers", [])]
-    notes = person.get("biographies", [{}])[0].get("value") if person.get("biographies") else None
+    notes = _contact_biography(person)
     photo_data = None
     photo_content_type = None
     picked_photo = _pick_photo(person.get("photos", []))
